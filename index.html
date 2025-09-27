@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en-us">
+
+<head>
+    <!-- Use same-origin asset resolution so the build can be embedded and still access storage reliably -->
+    <base href="./">
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <title>Unity WebGL Player | Hollow Knight</title>
+    <link rel="shortcut icon" href="TemplateData/favicon.ico">
+    <link rel="stylesheet" href="TemplateData/style.css">
+    <style>
+        html,
+        body {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            overflow: hidden;
+            background: #231F20;
+        }
+
+        #unity-container {
+            width: 100%;
+            height: 100%;
+            position: fixed;
+            top: 0;
+            left: 0;
+        }
+
+
+            /* Small overlay for save controls */
+            #hk-save-controls {
+                position: fixed;
+                top: 10px;
+                right: 10px;
+                z-index: 10000;
+                display: none;
+                background: rgba(0, 0, 0, 0.6);
+                border-radius: 8px;
+                padding: 6px;
+                font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+            }
+            #hk-save-controls button {
+                margin: 0 4px;
+                padding: 6px 10px;
+                font-size: 12px;
+                color: white;
+                background: #2d6cdf;
+                border: 1px solid #1f4aa3;
+                border-radius: 6px;
+                cursor: pointer;
+            }
+            #hk-save-controls button:hover { filter: brightness(1.1); }
+    </style>
+</head>
+
+<body>
+    <div id="loading-text" style="color: white; font-size: 48px; font-family: cursive; text-align: center; margin-top: 20px;"> LOADING... </div>
+        <!-- Export/Import controls (work entirely inside iframe) -->
+        <div id="hk-save-controls" title="Download or load your save">
+            <button id="hk-export">Export Save</button>
+            <button id="hk-import">Import Save</button>
+            <input id="hk-file" type="file" accept="application/json,.json" style="display:none" />
+        </div>
+    <div hidden id="unity-container" class="unity-desktop">
+        <canvas id="unity-canvas"></canvas>
+        <div id="unity-loading-bar">
+            <div id="unity-logo"></div>
+            <div id="unity-progress-bar-empty">
+                <div id="unity-progress-bar-full"></div>
+            </div>
+        </div>
+        <div id="unity-mobile-warning"> WebGL builds are not supported on mobile devices. </div>
+    </div>
+    <script>
+        var loadingText = document.querySelector("#loading-text");
+        let totalBytes = 0;
+        let loadedBytes = 0;
+        // Request persistent storage to reduce chance of browser-eviction of IndexedDB saves
+        (async () => {
+            try {
+                if (navigator.storage && navigator.storage.persist) {
+                    await navigator.storage.persist();
+                }
+            } catch { /* noop */ }
+        })();
+
+        // Simple helper to wire robust IDBFS syncing for Unity WebGL builds
+    async function setupPersistentSaves(unityInstance) {
+            const Module = unityInstance.Module;
+            const FS = Module && Module.FS;
+            if (!Module || !FS) return;
+
+            // Mount IDBFS at /idbfs if not already present
+            try {
+                const idbfsPath = '/idbfs';
+                const exists = FS.analyzePath(idbfsPath).exists;
+                if (!exists) {
+                    FS.mkdir(idbfsPath);
+                    FS.mount(Module.IDBFS, {}, idbfsPath);
+                }
+            } catch { /* ignore mount errors; likely already mounted by Unity */ }
+
+            // Initial sync from IndexedDB to memory FS
+            await new Promise(resolve => {
+                try { FS.syncfs(true, () => resolve()); } catch { resolve(); }
+            });
+
+            // Mark FS ready for UI controls
+            try { window.__hkModule = Module; window.__hkFSReady = true; } catch {}
+
+            // Periodic background sync to persist progress while playing
+            let saveInterval = setInterval(() => {
+                try { FS.syncfs(false, () => {}); } catch { /* ignore */ }
+            }, 15000); // every 15s
+
+            // Sync on lifecycle events (minimize data loss on tab close or nav away)
+            const doSync = (done) => {
+                try { FS.syncfs(false, () => done && done()); } catch { done && done(); }
+            };
+
+            const visibilityHandler = () => { if (document.hidden) doSync(); };
+            const pagehideHandler = (e) => { doSync(); };
+            const beforeUnloadHandler = (e) => { doSync(); };
+
+            document.addEventListener('visibilitychange', visibilityHandler);
+            window.addEventListener('pagehide', pagehideHandler);
+            window.addEventListener('beforeunload', beforeUnloadHandler);
+
+            // Allow parent window to request a save via postMessage
+            window.addEventListener('message', (event) => {
+                try {
+                    if (event && event.data && event.data.type === 'HK_SAVE') {
+                        doSync();
+                    }
+                } catch { /* ignore */ }
+            });
+
+            // Expose a manual save hook for debugging or external triggers
+            window.hollowKnightSaveNow = () => doSync();
+
+            // Clean up when quitting via Unity API
+            if (unityInstance.Quit) {
+                const originalQuit = unityInstance.Quit.bind(unityInstance);
+                unityInstance.Quit = () => new Promise((resolve, reject) => {
+                    clearInterval(saveInterval);
+                    doSync(() => {
+                        originalQuit().then(resolve).catch(reject);
+                    });
+                });
+            }
+        }
+
+        // -------- Save Export/Import helpers (JSON bundle) --------
+        function hkEnsureDirs(FS, fullPath) {
+            const parts = fullPath.split('/');
+            let current = '';
+            for (let i = 1; i < parts.length - 1; i++) {
+                current += '/' + parts[i];
+                try {
+                    const exists = FS.analyzePath(current).exists;
+                    if (!exists) FS.mkdir(current);
+                } catch (e) {
+                    try { FS.mkdir(current); } catch {}
+                }
+            }
+        }
+
+        function hkListFilesRecursive(FS, root) {
+            const files = [];
+            const walk = (p) => {
+                let entries;
+                try { entries = FS.readdir(p); } catch { return; }
+                for (const name of entries) {
+                    if (name === '.' || name === '..') continue;
+                    const full = p === '/' ? '/' + name : p + '/' + name;
+                    try {
+                        const st = FS.stat(full);
+                        if (FS.isDir(st.mode)) walk(full); else files.push(full);
+                    } catch {}
+                }
+            };
+            walk(root);
+            return files;
+        }
+
+        function hkUint8ToBase64(u8) {
+            const CHUNK = 0x8000;
+            let result = '';
+            for (let i = 0; i < u8.length; i += CHUNK) {
+                result += String.fromCharCode.apply(null, u8.subarray(i, i + CHUNK));
+            }
+            return btoa(result);
+        }
+
+        function hkBase64ToUint8(b64) {
+            const str = atob(b64);
+            const u8 = new Uint8Array(str.length);
+            for (let i = 0; i < str.length; i++) u8[i] = str.charCodeAt(i);
+            return u8;
+        }
+
+        async function hkExportSave() {
+            try {
+                if (!window.__hkModule || !window.__hkFSReady) { alert('Save system not ready yet. Try again in a moment.'); return; }
+                const Module = window.__hkModule; const FS = Module.FS;
+                // Flush recent changes before exporting
+                await new Promise(r => { try { FS.syncfs(false, () => r()); } catch { r(); } });
+                const root = '/idbfs';
+                const files = hkListFilesRecursive(FS, root);
+                const payload = { version: 1, createdAt: new Date().toISOString(), files: [] };
+                for (const path of files) {
+                    try {
+                        const data = FS.readFile(path, { encoding: 'binary' });
+                        payload.files.push({ path, b64: hkUint8ToBase64(data) });
+                    } catch { /* skip unreadable files */ }
+                }
+                const json = JSON.stringify(payload);
+                const blob = new Blob([json], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                const ts = new Date().toISOString().replace(/[:.]/g, '-');
+                a.download = `hk-save-${ts}.json`;
+                document.body.appendChild(a);
+                a.click();
+                setTimeout(() => { URL.revokeObjectURL(url); document.body.removeChild(a); }, 0);
+            } catch (e) {
+                alert('Export failed: ' + (e && e.message ? e.message : e));
+            }
+        }
+
+        async function hkImportSave(file) {
+            try {
+                if (!window.__hkModule || !window.__hkFSReady) { alert('Save system not ready yet. Try again in a moment.'); return; }
+                const text = await file.text();
+                const data = JSON.parse(text);
+                if (!data || !Array.isArray(data.files)) { alert('Invalid save file.'); return; }
+                const Module = window.__hkModule; const FS = Module.FS;
+                // Write files
+                for (const f of data.files) {
+                    if (!f || !f.path || !f.b64) continue;
+                    try {
+                        hkEnsureDirs(FS, f.path);
+                        const bytes = hkBase64ToUint8(f.b64);
+                        FS.writeFile(f.path, bytes, { encoding: 'binary' });
+                    } catch { /* continue */ }
+                }
+                // Persist to IndexedDB
+                await new Promise(r => { try { FS.syncfs(false, () => r()); } catch { r(); } });
+                alert('Save imported. If the game is running, return to main menu or reload the page to ensure it picks up the new save.');
+            } catch (e) {
+                alert('Import failed: ' + (e && e.message ? e.message : e));
+            }
+        }
+        async function getSize(url) {
+            try {
+                const res = await fetch(url, {
+                    method: "HEAD"
+                });
+                return parseInt(res.headers.get("Content-Length") || "0", 10);
+            } catch {
+                return 0;
+            }
+        }
+        async function fetchWithProgress(url) {
+            const response = await fetch(url);
+            const reader = response.body.getReader();
+            let chunks = [];
+            let received = 0;
+            while (true) {
+                const {
+                    done,
+                    value
+                } = await reader.read();
+                if (done) break;
+                received += value.length;
+                loadedBytes += value.length;
+                chunks.push(value);
+                let mbDone = (loadedBytes / (1024 * 1024)).toFixed(2);
+                let mbTotal = '909.17';
+                loadingText.textContent = `LOADING... ${mbDone} MB / ${mbTotal} MB`;
+            }
+            let fullBuffer = new Uint8Array(received);
+            let offset = 0;
+            for (let chunk of chunks) {
+                fullBuffer.set(chunk, offset);
+                offset += chunk.length;
+            }
+            return fullBuffer.buffer;
+        }
+        async function mergeFiles(fileParts) {
+            const buffers = await Promise.all(fileParts.map(part => fetchWithProgress(part)));
+            const mergedBlob = new Blob(buffers);
+            return URL.createObjectURL(mergedBlob);
+        }
+
+        function getParts(file, start, end) {
+            let parts = [];
+            for (let i = start; i <= end; i++) {
+                parts.push(file + ".part" + i);
+            }
+            return parts;
+        }
+        (async () => {
+            const allParts = [...getParts("Build/bog.data", 1, 44), ...getParts("Build/bog.wasm", 1, 2), ];
+            const sizes = await Promise.all(allParts.map(getSize));
+            totalBytes = sizes.reduce((a, b) => a + b, 0);
+            const [dataUrl, wasmurl] = await Promise.all([
+                mergeFiles(getParts("Build/bog.data", 1, 44)),
+                mergeFiles(getParts("Build/bog.wasm", 1, 2)),
+            ]);
+            var buildUrl = "Build";
+            var loaderUrl = buildUrl + "/bog.loader.js";
+            var config = {
+                dataUrl: dataUrl,
+                frameworkUrl: buildUrl + "/bog.framework.js",
+                codeUrl: wasmurl,
+                streamingAssetsUrl: "StreamingAssets",
+                companyName: "Team Cherry & Truffled",
+                productName: "Hollow Knight",
+                productVersion: "1.0",
+            };
+            var container = document.querySelector("#unity-container");
+            container.hidden = false;
+            var canvas = document.querySelector("#unity-canvas");
+            var loadingBar = document.querySelector("#unity-loading-bar");
+            var progressBarFull = document.querySelector("#unity-progress-bar-full");
+            var fullscreenButton = document.querySelector("#unity-fullscreen-button");
+            var mobileWarning = document.querySelector("#unity-mobile-warning");
+            if (/iPhone|iPad|iPod|Android/i.test(navigator.userAgent)) {
+                container.className = "unity-mobile";
+                config.devicePixelRatio = 1;
+                mobileWarning.style.display = "block";
+                setTimeout(() => {
+                    mobileWarning.style.display = "none";
+                }, 5000);
+            } else {
+              if (/iPhone|iPad|iPod|Android/i.test(navigator.userAgent)) {
+                var meta = document.createElement('meta');
+                meta.name = 'viewport';
+                meta.content = 'width=device-width, height=device-height, initial-scale=1.0, user-scalable=no, shrink-to-fit=yes';
+                document.getElementsByTagName('head')[0].appendChild(meta);
+                container.className = "unity-mobile";
+                canvas.className = "unity-mobile";
+            } else {
+                function resizeCanvas() {
+                    canvas.width = window.innerWidth;
+                    canvas.height = window.innerHeight;
+                    canvas.style.width = window.innerWidth + "px";
+                    canvas.style.height = window.innerHeight + "px";
+                }
+                resizeCanvas();
+                window.addEventListener('resize', resizeCanvas);
+            }
+            }
+            loadingBar.style.display = "block";
+            var script = document.createElement("script");
+            script.src = loaderUrl;
+            script.onload = () => {
+                createUnityInstance(canvas, config, (progress) => {
+                    progressBarFull.style.width = 100 * progress + "%";
+                }).then((unityInstance) => {
+                  loadingText.remove();
+                    loadingBar.style.display = "none";
+                    canvas.style.display = "block";
+                    // Wire up persistent saves once Unity is ready
+                    setupPersistentSaves(unityInstance);
+                    // Hook up export/import UI
+                    const controls = document.getElementById('hk-save-controls');
+                    const btnExport = document.getElementById('hk-export');
+                    const btnImport = document.getElementById('hk-import');
+                    const fileInput = document.getElementById('hk-file');
+                    controls.style.display = 'block';
+                    btnExport.addEventListener('click', () => hkExportSave());
+                    btnImport.addEventListener('click', () => fileInput.click());
+                    fileInput.addEventListener('change', (e) => {
+                        const f = e.target.files && e.target.files[0];
+                        if (f) hkImportSave(f);
+                        e.target.value = '';
+                    });
+                }).catch((message) => {
+                    alert(message);
+                });
+            };
+            document.body.appendChild(script);
+        })();
+    </script>
+</body>
+
+</html>

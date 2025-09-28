@@ -87,11 +87,41 @@
             } catch { /* noop */ }
         })();
 
+        // FS readiness helpers
+        function waitForFS(unityInstance, timeoutMs = 15000) {
+            return new Promise((resolve, reject) => {
+                const start = Date.now();
+                (function check() {
+                    const Module = unityInstance && unityInstance.Module;
+                    const FS = Module && Module.FS;
+                    if (Module && FS && FS.syncfs && FS.filesystems && FS.filesystems.IDBFS) {
+                        return resolve({ Module, FS });
+                    }
+                    if (Date.now() - start > timeoutMs) return reject(new Error('FS not ready'));
+                    setTimeout(check, 50);
+                })();
+            });
+        }
+
+        function waitForFSReady(timeoutMs = 15000) {
+            if (window.__hkFSReady) return Promise.resolve();
+            return new Promise((resolve, reject) => {
+                const id = setTimeout(() => reject(new Error('Save FS init timeout')), timeoutMs);
+                const onReady = () => { clearTimeout(id); window.removeEventListener('hk-fs-ready', onReady); resolve(); };
+                window.addEventListener('hk-fs-ready', onReady);
+            });
+        }
+
+        function signalFSReady() {
+            window.__hkFSReady = true;
+            try { window.dispatchEvent(new Event('hk-fs-ready')); } catch {}
+        }
+
         // Simple helper to wire robust IDBFS syncing for Unity WebGL builds
-    async function setupPersistentSaves(unityInstance) {
-            const Module = unityInstance.Module;
-            const FS = Module && Module.FS;
-            if (!Module || !FS) return;
+        async function setupPersistentSaves(unityInstance) {
+            // Ensure Emscripten FS and IDBFS are ready
+            let Module, FS;
+            try { ({ Module, FS } = await waitForFS(unityInstance)); } catch { return; }
 
             // Mount IDBFS at /idbfs if not already present
             try {
@@ -99,7 +129,7 @@
                 const exists = FS.analyzePath(idbfsPath).exists;
                 if (!exists) {
                     FS.mkdir(idbfsPath);
-                    FS.mount(Module.IDBFS, {}, idbfsPath);
+                    FS.mount(FS.filesystems.IDBFS, {}, idbfsPath);
                 }
             } catch { /* ignore mount errors; likely already mounted by Unity */ }
 
@@ -109,7 +139,8 @@
             });
 
             // Mark FS ready for UI controls
-            try { window.__hkModule = Module; window.__hkFSReady = true; } catch {}
+            try { window.__hkModule = Module; } catch {}
+            signalFSReady();
 
             // Periodic background sync to persist progress while playing
             let saveInterval = setInterval(() => {
@@ -202,9 +233,10 @@
             return u8;
         }
 
-        async function hkExportSave() {
+    async function hkExportSave() {
             try {
-                if (!window.__hkModule || !window.__hkFSReady) { alert('Save system not ready yet. Try again in a moment.'); return; }
+        if (!window.__hkModule || !window.__hkFSReady) { await waitForFSReady(5000).catch(()=>{}); }
+        if (!window.__hkModule || !window.__hkFSReady) { alert('Save system not ready yet. Try again in a moment.'); return; }
                 const Module = window.__hkModule; const FS = Module.FS;
                 // Flush recent changes before exporting
                 await new Promise(r => { try { FS.syncfs(false, () => r()); } catch { r(); } });
@@ -250,9 +282,10 @@
             }
         }
 
-        async function hkImportSave(file) {
+    async function hkImportSave(file) {
             try {
-                if (!window.__hkModule || !window.__hkFSReady) { alert('Save system not ready yet. Try again in a moment.'); return; }
+        if (!window.__hkModule || !window.__hkFSReady) { await waitForFSReady(5000).catch(()=>{}); }
+        if (!window.__hkModule || !window.__hkFSReady) { alert('Save system not ready yet. Try again in a moment.'); return; }
                 const text = await file.text();
                 const data = JSON.parse(text);
                 if (!data || !Array.isArray(data.files)) { alert('Invalid save file.'); return; }

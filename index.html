@@ -221,34 +221,30 @@
                         payload.files.push({ path, b64: hkUint8ToBase64(data) });
                     } catch { /* skip unreadable files */ }
                 }
-                const json = JSON.stringify(payload);
-                const blob = new Blob([json], { type: 'application/json' });
-                const url = URL.createObjectURL(blob);
-                const ts = new Date().toISOString().replace(/[:.]/g, '-');
+                                const json = JSON.stringify(payload);
+                                const b64 = btoa(json);
+                                const ts = new Date().toISOString().replace(/[:.]/g, '-');
 
-                // Prefer downloading from an about:blank helper tab to bypass iframe restrictions
-                const helper = window.open('about:blank', '_blank');
-                if (helper) {
-                    try {
-                        helper.document.open();
+                                // Open about:blank and construct the download entirely within that page
+                                const helper = window.open('about:blank', '_blank');
+                                if (helper) {
+                                        try {
+                                                helper.document.open();
                                                 helper.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Downloading…</title></head>
-                                                    <body onload="setTimeout(function(){try{document.getElementById('dl').click()}catch(e){}},50)" style="background:#111;color:#fff;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;">
-                                                        <a id="dl" style="color:#8ab4f8;" href="${url}" download="hk-save-${ts}.json">If your download didn't start, click here.</a>
+                                                    <body onload="var a=document.createElement('a'); a.href='data:application/json;base64,${b64}'; a.download='hk-save-${ts}.json'; document.body.appendChild(a); a.click();" style="background:#111;color:#fff;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;">
+                                                        <a style="color:#8ab4f8;" href="data:application/json;base64,${b64}" download="hk-save-${ts}.json">If your download didn't start, click here.</a>
                                                     </body></html>`);
-                        helper.document.close();
-                    } catch (e) {
-                        // If writing is blocked, navigate the helper to the blob URL (URL bar may change to blob:)
-                        try { helper.location.href = url; } catch {}
-                    }
-                } else {
-                    // Popup blocked: try inline download as a fallback
-                    const a = document.createElement('a');
-                    a.href = url; a.download = `hk-save-${ts}.json`;
-                    document.body.appendChild(a); a.click();
-                    setTimeout(() => { document.body.removeChild(a); }, 0);
-                }
-                // Revoke after a few seconds to allow download to start
-                setTimeout(() => { URL.revokeObjectURL(url); }, 10000);
+                                                helper.document.close();
+                                        } catch (e) {
+                                                // Fallback: navigate to data URL (user can Save Page As)
+                                                try { helper.location.href = `data:application/json;base64,${b64}`; } catch {}
+                                        }
+                                } else {
+                                        // Popup blocked: inline fallback
+                                        const a = document.createElement('a');
+                                        a.href = `data:application/json;base64,${b64}`; a.download = `hk-save-${ts}.json`;
+                                        document.body.appendChild(a); a.click(); setTimeout(() => a.remove(), 0);
+                                }
             } catch (e) {
                 alert('Export failed: ' + (e && e.message ? e.message : e));
             }

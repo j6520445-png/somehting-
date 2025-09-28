@@ -29,7 +29,7 @@
         }
 
 
-            /* Small overlay for save controls */
+            /* Small overlay for open-in-new-tab */
             #hk-save-controls {
                 position: fixed;
                 top: 10px;
@@ -57,16 +57,9 @@
 
 <body>
     <div id="loading-text" style="color: white; font-size: 48px; font-family: cursive; text-align: center; margin-top: 20px;"> LOADING... </div>
-        <!-- Export/Import controls (work entirely inside iframe) -->
-        <div id="hk-save-controls" title="Download or load your save">
-            <button id="hk-export">Download Save</button>
-            <button id="hk-copy">Copy Save</button>
-            <button id="hk-import">Import Save</button>
-            <button id="hk-paste">Paste Save</button>
+        <!-- Minimal control: only Open in New Tab (about:blank) -->
+        <div id="hk-save-controls" title="Open the game in a new tab (about:blank)">
             <button id="hk-newtab">Open in New Tab</button>
-            <button id="hk-standalone">Standalone (saves)</button>
-            
-            <input id="hk-file" type="file" accept="application/json,.json" style="display:none" />
         </div>
     <div hidden id="unity-container" class="unity-desktop">
         <canvas id="unity-canvas"></canvas>
@@ -82,274 +75,7 @@
         var loadingText = document.querySelector("#loading-text");
         let totalBytes = 0;
         let loadedBytes = 0;
-        // Request persistent storage to reduce chance of browser-eviction of IndexedDB saves
-        (async () => {
-            try {
-                if (navigator.storage && navigator.storage.persist) {
-                    await navigator.storage.persist();
-                }
-            } catch { /* noop */ }
-        })();
-
-        // FS readiness helpers
-        function waitForFS(unityInstance, timeoutMs = 15000) {
-            return new Promise((resolve, reject) => {
-                const start = Date.now();
-                (function check() {
-                    const Module = unityInstance && unityInstance.Module;
-                    const FS = Module && Module.FS;
-                    if (Module && FS && FS.syncfs && FS.filesystems && FS.filesystems.IDBFS) {
-                        return resolve({ Module, FS });
-                    }
-                    if (Date.now() - start > timeoutMs) return reject(new Error('FS not ready'));
-                    setTimeout(check, 50);
-                })();
-            });
-        }
-
-        function waitForFSReady(timeoutMs = 15000) {
-            if (window.__hkFSReady) return Promise.resolve();
-            return new Promise((resolve, reject) => {
-                const id = setTimeout(() => reject(new Error('Save FS init timeout')), timeoutMs);
-                const onReady = () => { clearTimeout(id); window.removeEventListener('hk-fs-ready', onReady); resolve(); };
-                window.addEventListener('hk-fs-ready', onReady);
-            });
-        }
-
-        function signalFSReady() {
-            window.__hkFSReady = true;
-            try { window.dispatchEvent(new Event('hk-fs-ready')); } catch {}
-        }
-
-        // Simple helper to wire robust IDBFS syncing for Unity WebGL builds
-        async function setupPersistentSaves(unityInstance) {
-            let Module, FS;
-            try { ({ Module, FS } = await waitForFS(unityInstance)); } catch { return; }
-
-            // Mount IDBFS at /idbfs if not already present
-            try {
-                const idbfsPath = '/idbfs';
-                const exists = FS.analyzePath(idbfsPath).exists;
-                if (!exists) {
-                    FS.mkdir(idbfsPath);
-                    FS.mount(FS.filesystems.IDBFS, {}, idbfsPath);
-                }
-            } catch { /* ignore mount errors; likely already mounted by Unity */ }
-
-            // Initial sync from IndexedDB to memory FS
-            await new Promise(resolve => {
-                try { FS.syncfs(true, () => resolve()); } catch { resolve(); }
-            });
-
-            // Mark FS ready for UI controls
-            try { window.__hkModule = Module; } catch {}
-            signalFSReady();
-            // Create a tiny marker file to verify IDBFS writes (optional)
-            try { FS.writeFile('/idbfs/.hk_ready', new Uint8Array([1,2,3])); } catch {}
-
-            // Periodic background sync to persist progress while playing
-            let saveInterval = setInterval(() => {
-                try { FS.syncfs(false, () => {}); } catch { /* ignore */ }
-            }, 15000); // every 15s
-
-            // Sync on lifecycle events (minimize data loss on tab close or nav away)
-            const doSync = (done) => {
-                try {
-                    FS.syncfs(false, () => {
-                        
-                        done && done();
-                    });
-                } catch { done && done(); }
-            };
-
-            const visibilityHandler = () => { if (document.hidden) doSync(); };
-            const pagehideHandler = (e) => { doSync(); };
-            const beforeUnloadHandler = (e) => { doSync(); };
-
-            document.addEventListener('visibilitychange', visibilityHandler);
-            window.addEventListener('pagehide', pagehideHandler);
-            window.addEventListener('beforeunload', beforeUnloadHandler);
-
-            // Allow parent window to request a save via postMessage
-            window.addEventListener('message', (event) => {
-                try {
-                    if (event && event.data && event.data.type === 'HK_SAVE') {
-                        doSync();
-                    }
-                } catch { /* ignore */ }
-            });
-
-            // Expose a manual save hook for debugging or external triggers
-            window.hollowKnightSaveNow = () => doSync();
-
-            // Clean up when quitting via Unity API
-            if (unityInstance.Quit) {
-                const originalQuit = unityInstance.Quit.bind(unityInstance);
-                unityInstance.Quit = () => new Promise((resolve, reject) => {
-                    clearInterval(saveInterval);
-                    doSync(() => {
-                        originalQuit().then(resolve).catch(reject);
-                    });
-                });
-            }
-        }
-
-        // -------- Save Export/Import helpers (JSON bundle) --------
-        function hkEnsureDirs(FS, fullPath) {
-            const parts = fullPath.split('/');
-            let current = '';
-            for (let i = 1; i < parts.length - 1; i++) {
-                current += '/' + parts[i];
-                try {
-                    const exists = FS.analyzePath(current).exists;
-                    if (!exists) FS.mkdir(current);
-                } catch (e) {
-                    try { FS.mkdir(current); } catch {}
-                }
-            }
-        }
-
-        function hkListFilesRecursive(FS, root) {
-            const files = [];
-            const walk = (p) => {
-                let entries;
-                try { entries = FS.readdir(p); } catch { return; }
-                for (const name of entries) {
-                    if (name === '.' || name === '..') continue;
-                    const full = p === '/' ? '/' + name : p + '/' + name;
-                    try {
-                        const st = FS.stat(full);
-                        if (FS.isDir(st.mode)) walk(full); else files.push(full);
-                    } catch {}
-                }
-            };
-            walk(root);
-            return files;
-        }
-
-        function hkUint8ToBase64(u8) {
-            const CHUNK = 0x8000;
-            let result = '';
-            for (let i = 0; i < u8.length; i += CHUNK) {
-                result += String.fromCharCode.apply(null, u8.subarray(i, i + CHUNK));
-            }
-            return btoa(result);
-        }
-
-        function hkBase64ToUint8(b64) {
-            const str = atob(b64);
-            const u8 = new Uint8Array(str.length);
-            for (let i = 0; i < str.length; i++) u8[i] = str.charCodeAt(i);
-            return u8;
-        }
-
-    async function hkExportSave() {
-            try {
-        if (!window.__hkModule || !window.__hkFSReady) { await waitForFSReady(5000).catch(()=>{}); }
-        if (!window.__hkModule || !window.__hkFSReady) { alert('Save system not ready yet. Try again in a moment.'); return; }
-                const Module = window.__hkModule; const FS = Module.FS;
-                // Flush recent changes before exporting
-        await new Promise(r => { try { FS.syncfs(false, () => { try { window.__hkLastSync = Date.now(); hkUpdateStatus(); } catch {} r(); }); } catch { r(); } });
-                const root = '/idbfs';
-                const files = hkListFilesRecursive(FS, root);
-                const payload = { version: 1, createdAt: new Date().toISOString(), files: [] };
-                if (!files || files.length === 0) {
-                    // Still provide a minimal file so the user gets feedback
-                    payload.note = 'No save files were found. Create a save in-game, then try again.';
-                }
-                for (const path of files) {
-                    try {
-                        const data = FS.readFile(path, { encoding: 'binary' });
-                        payload.files.push({ path, b64: hkUint8ToBase64(data) });
-                    } catch { /* skip unreadable files */ }
-                }
-                const json = JSON.stringify(payload);
-                // Use helper page for more reliable downloads across iframes/policies
-                const encoded = encodeURIComponent(json);
-                const helperUrl = new URL('download.html', location.href).toString() + '#' + encoded;
-                const w = window.open(helperUrl, '_blank');
-                if (!w) {
-                    // Popup blocked: fall back to navigating current tab
-                    location.href = helperUrl;
-                }
-            } catch (e) {
-                alert('Export failed: ' + (e && e.message ? e.message : e));
-            }
-        }
-        async function hkCopySave() {
-            try {
-                if (!window.__hkModule || !window.__hkFSReady) { await waitForFSReady(5000).catch(()=>{}); }
-                if (!window.__hkModule || !window.__hkFSReady) { alert('Save system not ready yet. Try again in a moment.'); return; }
-                const Module = window.__hkModule; const FS = Module.FS;
-                await new Promise(r => { try { FS.syncfs(false, () => r()); } catch { r(); } });
-                const root = '/idbfs';
-                const files = hkListFilesRecursive(FS, root);
-                const payload = { version: 1, createdAt: new Date().toISOString(), files: [] };
-                for (const path of files) {
-                    try {
-                        const data = FS.readFile(path, { encoding: 'binary' });
-                        payload.files.push({ path, b64: hkUint8ToBase64(data) });
-                    } catch {}
-                }
-                const json = JSON.stringify(payload);
-                if (navigator.clipboard && navigator.clipboard.writeText) {
-                    await navigator.clipboard.writeText(json);
-                } else {
-                    const ta = document.createElement('textarea');
-                    ta.value = json; ta.style.position='fixed'; ta.style.left='-9999px';
-                    document.body.appendChild(ta); ta.focus(); ta.select();
-                    document.execCommand('copy');
-                    document.body.removeChild(ta);
-                }
-                alert('Save copied to clipboard. Keep it in a safe place. Use Paste Save to restore later.');
-            } catch (e) {
-                alert('Copy failed: ' + (e && e.message ? e.message : e));
-            }
-        }
-
-        async function hkPasteSave() {
-            try {
-                let text = '';
-                if (navigator.clipboard && navigator.clipboard.readText) {
-                    text = await navigator.clipboard.readText();
-                }
-                if (!text) {
-                    text = prompt('Paste your save JSON here:') || '';
-                }
-                if (!text.trim()) { return; }
-                // Reuse import logic
-                const fakeFile = new Blob([text], {type:'application/json'});
-                await hkImportSave(fakeFile);
-            } catch (e) {
-                alert('Paste failed: ' + (e && e.message ? e.message : e));
-            }
-        }
-
-
-    async function hkImportSave(file) {
-            try {
-        if (!window.__hkModule || !window.__hkFSReady) { await waitForFSReady(5000).catch(()=>{}); }
-        if (!window.__hkModule || !window.__hkFSReady) { alert('Save system not ready yet. Try again in a moment.'); return; }
-                const text = await file.text();
-                const data = JSON.parse(text);
-                if (!data || !Array.isArray(data.files)) { alert('Invalid save file.'); return; }
-                const Module = window.__hkModule; const FS = Module.FS;
-                // Write files
-                for (const f of data.files) {
-                    if (!f || !f.path || !f.b64) continue;
-                    try {
-                        hkEnsureDirs(FS, f.path);
-                        const bytes = hkBase64ToUint8(f.b64);
-                        FS.writeFile(f.path, bytes, { encoding: 'binary' });
-                    } catch { /* continue */ }
-                }
-                // Persist to IndexedDB
-                await new Promise(r => { try { FS.syncfs(false, () => { try { window.__hkLastSync = Date.now(); hkUpdateStatus(); } catch {} r(); }); } catch { r(); } });
-                alert('Save imported. If the game is running, return to main menu or reload the page to ensure it picks up the new save.');
-            } catch (e) {
-                alert('Import failed: ' + (e && e.message ? e.message : e));
-            }
-        }
+        
         async function getSize(url) {
             try {
                 const res = await fetch(url, {
@@ -461,27 +187,10 @@
                   loadingText.remove();
                     loadingBar.style.display = "none";
                     canvas.style.display = "block";
-                    // Wire up persistent saves once Unity is ready
-                    setupPersistentSaves(unityInstance);
-                    // Hook up export/import UI
+                    // Show minimal control overlay
                     const controls = document.getElementById('hk-save-controls');
-                    const btnExport = document.getElementById('hk-export');
-                    const btnImport = document.getElementById('hk-import');
-                    const btnCopy = document.getElementById('hk-copy');
-                    const btnPaste = document.getElementById('hk-paste');
                     const btnNewTab = document.getElementById('hk-newtab');
-                    const btnStandalone = document.getElementById('hk-standalone');
-                    const fileInput = document.getElementById('hk-file');
                     controls.style.display = 'block';
-                    btnExport.addEventListener('click', () => hkExportSave());
-                    btnCopy.addEventListener('click', () => hkCopySave());
-                    btnImport.addEventListener('click', () => fileInput.click());
-                    btnPaste.addEventListener('click', () => hkPasteSave());
-                    fileInput.addEventListener('change', (e) => {
-                        const f = e.target.files && e.target.files[0];
-                        if (f) hkImportSave(f);
-                        e.target.value = '';
-                    });
                     btnNewTab.addEventListener('click', () => {
                         const targetUrl = 'https://j6520445-png.github.io/somehting-/index.html';
                         const w = window.open('about:blank', '_blank');
@@ -500,18 +209,6 @@
                             try { w.location.href = targetUrl; } catch {}
                         }
                     });
-                    btnStandalone.addEventListener('click', () => {
-                        // Open the game directly (top-level) so storage is first-party and reliable
-                        const targetUrl = 'https://j6520445-png.github.io/somehting-/index.html';
-                        const w = window.open(targetUrl, '_blank');
-                        if (!w) { alert('Popup blocked by the browser. Allow popups for this site.'); }
-                    });
-                    // If inside an iframe (embedded), hint that saving may be limited by the host site
-                    try {
-                        if (window.top !== window.self) {
-                            controls.title = 'Embedded mode: your browser or the host site may block persistent storage. Use Standalone for reliable saves.';
-                        }
-                    } catch {}
                 }).catch((message) => {
                     alert(message);
                 });

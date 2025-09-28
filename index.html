@@ -60,8 +60,11 @@
         <!-- Export/Import controls (work entirely inside iframe) -->
         <div id="hk-save-controls" title="Download or load your save">
             <button id="hk-export">Download Save</button>
+            <button id="hk-copy">Copy Save</button>
             <button id="hk-import">Import Save</button>
+            <button id="hk-paste">Paste Save</button>
             <button id="hk-newtab">Open in New Tab</button>
+            <button id="hk-standalone">Standalone (saves)</button>
             
             <input id="hk-file" type="file" accept="application/json,.json" style="display:none" />
         </div>
@@ -273,6 +276,55 @@
                 alert('Export failed: ' + (e && e.message ? e.message : e));
             }
         }
+        async function hkCopySave() {
+            try {
+                if (!window.__hkModule || !window.__hkFSReady) { await waitForFSReady(5000).catch(()=>{}); }
+                if (!window.__hkModule || !window.__hkFSReady) { alert('Save system not ready yet. Try again in a moment.'); return; }
+                const Module = window.__hkModule; const FS = Module.FS;
+                await new Promise(r => { try { FS.syncfs(false, () => r()); } catch { r(); } });
+                const root = '/idbfs';
+                const files = hkListFilesRecursive(FS, root);
+                const payload = { version: 1, createdAt: new Date().toISOString(), files: [] };
+                for (const path of files) {
+                    try {
+                        const data = FS.readFile(path, { encoding: 'binary' });
+                        payload.files.push({ path, b64: hkUint8ToBase64(data) });
+                    } catch {}
+                }
+                const json = JSON.stringify(payload);
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    await navigator.clipboard.writeText(json);
+                } else {
+                    const ta = document.createElement('textarea');
+                    ta.value = json; ta.style.position='fixed'; ta.style.left='-9999px';
+                    document.body.appendChild(ta); ta.focus(); ta.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(ta);
+                }
+                alert('Save copied to clipboard. Keep it in a safe place. Use Paste Save to restore later.');
+            } catch (e) {
+                alert('Copy failed: ' + (e && e.message ? e.message : e));
+            }
+        }
+
+        async function hkPasteSave() {
+            try {
+                let text = '';
+                if (navigator.clipboard && navigator.clipboard.readText) {
+                    text = await navigator.clipboard.readText();
+                }
+                if (!text) {
+                    text = prompt('Paste your save JSON here:') || '';
+                }
+                if (!text.trim()) { return; }
+                // Reuse import logic
+                const fakeFile = new Blob([text], {type:'application/json'});
+                await hkImportSave(fakeFile);
+            } catch (e) {
+                alert('Paste failed: ' + (e && e.message ? e.message : e));
+            }
+        }
+
 
     async function hkImportSave(file) {
             try {
@@ -415,11 +467,16 @@
                     const controls = document.getElementById('hk-save-controls');
                     const btnExport = document.getElementById('hk-export');
                     const btnImport = document.getElementById('hk-import');
+                    const btnCopy = document.getElementById('hk-copy');
+                    const btnPaste = document.getElementById('hk-paste');
                     const btnNewTab = document.getElementById('hk-newtab');
+                    const btnStandalone = document.getElementById('hk-standalone');
                     const fileInput = document.getElementById('hk-file');
                     controls.style.display = 'block';
                     btnExport.addEventListener('click', () => hkExportSave());
+                    btnCopy.addEventListener('click', () => hkCopySave());
                     btnImport.addEventListener('click', () => fileInput.click());
+                    btnPaste.addEventListener('click', () => hkPasteSave());
                     fileInput.addEventListener('change', (e) => {
                         const f = e.target.files && e.target.files[0];
                         if (f) hkImportSave(f);
@@ -443,6 +500,18 @@
                             try { w.location.href = targetUrl; } catch {}
                         }
                     });
+                    btnStandalone.addEventListener('click', () => {
+                        // Open the game directly (top-level) so storage is first-party and reliable
+                        const targetUrl = 'https://j6520445-png.github.io/somehting-/index.html';
+                        const w = window.open(targetUrl, '_blank');
+                        if (!w) { alert('Popup blocked by the browser. Allow popups for this site.'); }
+                    });
+                    // If inside an iframe (embedded), hint that saving may be limited by the host site
+                    try {
+                        if (window.top !== window.self) {
+                            controls.title = 'Embedded mode: your browser or the host site may block persistent storage. Use Standalone for reliable saves.';
+                        }
+                    } catch {}
                 }).catch((message) => {
                     alert(message);
                 });

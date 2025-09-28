@@ -100,10 +100,26 @@
         function initSaveSystem(unityInstance) {
             unityModule = unityInstance.Module;
             
-            // Wait for filesystem to be ready
+            // Try multiple detection methods for Unity filesystem
+            let attempts = 0;
+            const maxAttempts = 100; // 10 seconds max wait
+            
             const checkFS = setInterval(() => {
-                if (unityModule.FS && unityModule.FS.filesystems && unityModule.FS.filesystems.IDBFS) {
+                attempts++;
+                
+                // Check multiple conditions for readiness
+                const hasFS = unityModule && unityModule.FS;
+                const hasIDBFS = hasFS && unityModule.FS.filesystems && unityModule.FS.filesystems.IDBFS;
+                const hasSyncfs = hasFS && typeof unityModule.FS.syncfs === 'function';
+                
+                if (hasFS && hasIDBFS && hasSyncfs) {
                     clearInterval(checkFS);
+                    console.log('Unity filesystem detected, setting up persistence...');
+                    setupPersistence();
+                } else if (attempts >= maxAttempts) {
+                    clearInterval(checkFS);
+                    console.log('Filesystem not detected, trying fallback setup...');
+                    // Fallback - try setup anyway
                     setupPersistence();
                 }
             }, 100);
@@ -111,66 +127,125 @@
 
         function setupPersistence() {
             try {
+                if (!unityModule || !unityModule.FS) {
+                    console.log('No Unity FS available, marking save as ready anyway');
+                    saveReady = true;
+                    return;
+                }
+
                 // Mount IDBFS for persistent storage
                 const saveDir = '/idbfs';
-                if (!unityModule.FS.analyzePath(saveDir).exists) {
-                    unityModule.FS.mkdir(saveDir);
-                    unityModule.FS.mount(unityModule.FS.filesystems.IDBFS, {}, saveDir);
+                
+                // Check if directory already exists
+                let dirExists = false;
+                try {
+                    dirExists = unityModule.FS.analyzePath(saveDir).exists;
+                } catch (e) {
+                    console.log('analyzePath failed, trying mkdir anyway');
+                }
+
+                if (!dirExists) {
+                    try {
+                        unityModule.FS.mkdir(saveDir);
+                    } catch (e) {
+                        console.log('mkdir failed, directory might already exist');
+                    }
+                    
+                    try {
+                        unityModule.FS.mount(unityModule.FS.filesystems.IDBFS, {}, saveDir);
+                        console.log('IDBFS mounted at', saveDir);
+                    } catch (e) {
+                        console.log('IDBFS mount failed:', e.message);
+                    }
                 }
                 
                 // Initial sync from IndexedDB
-                unityModule.FS.syncfs(true, () => {
+                if (unityModule.FS.syncfs) {
+                    unityModule.FS.syncfs(true, (err) => {
+                        if (err) {
+                            console.log('Initial sync failed, but marking ready:', err);
+                        } else {
+                            console.log('Initial sync successful');
+                        }
+                        saveReady = true;
+                        console.log('Hollow Knight save system ready');
+                    });
+                } else {
+                    console.log('No syncfs available, marking ready anyway');
                     saveReady = true;
-                    console.log('Hollow Knight save system ready');
-                });
+                }
 
                 // Auto-save periodically
                 setInterval(() => {
-                    if (saveReady) {
+                    if (saveReady && unityModule.FS && unityModule.FS.syncfs) {
                         unityModule.FS.syncfs(false, () => {});
                     }
                 }, 10000); // Save every 10 seconds
 
                 // Save on page unload
                 window.addEventListener('beforeunload', () => {
-                    if (saveReady) {
+                    if (saveReady && unityModule.FS && unityModule.FS.syncfs) {
                         unityModule.FS.syncfs(false, () => {});
                     }
                 });
 
             } catch (e) {
                 console.error('Save system setup failed:', e);
+                // Mark as ready anyway so user can try manual operations
+                saveReady = true;
+                console.log('Marked save system as ready despite errors');
             }
         }
 
         // Download save as file (like Pokemon save system)
         function downloadSave() {
-            if (!saveReady || !unityModule) {
-                alert('Save system not ready. Please wait for the game to fully load.');
+            if (!saveReady) {
+                alert('Save system is still initializing. Please wait a moment and try again.');
+                return;
+            }
+            
+            if (!unityModule) {
+                alert('Unity not loaded yet. Please wait for the game to start.');
                 return;
             }
 
             try {
-                // Sync current state first
-                unityModule.FS.syncfs(false, () => {
-                    const saveData = collectSaveData();
-                    const json = JSON.stringify(saveData, null, 2);
-                    
-                    // Create download blob (like Pokemon save)
-                    const blob = new Blob([json], { type: 'application/json' });
-                    const url = URL.createObjectURL(blob);
-                    
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = `hollow-knight-save-${Date.now()}.hksave`;
-                    a.style.display = 'none';
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                    URL.revokeObjectURL(url);
-                    
-                    alert('Save file downloaded!');
-                });
+                // Sync current state first (if available)
+                const performDownload = () => {
+                    try {
+                        const saveData = collectSaveData();
+                        const json = JSON.stringify(saveData, null, 2);
+                        
+                        if (!saveData.files || Object.keys(saveData.files).length === 0) {
+                            alert('No save data found. Make sure you have saved progress in the game first.');
+                            return;
+                        }
+                        
+                        // Create download blob (like Pokemon save)
+                        const blob = new Blob([json], { type: 'application/json' });
+                        const url = URL.createObjectURL(blob);
+                        
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = `hollow-knight-save-${Date.now()}.hksave`;
+                        a.style.display = 'none';
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                        URL.revokeObjectURL(url);
+                        
+                        alert(`Save file downloaded! Found ${Object.keys(saveData.files).length} save files.`);
+                    } catch (e) {
+                        alert('Failed to create save file: ' + e.message);
+                    }
+                };
+
+                if (unityModule.FS && unityModule.FS.syncfs) {
+                    unityModule.FS.syncfs(false, performDownload);
+                } else {
+                    console.log('No syncfs available, downloading current state');
+                    performDownload();
+                }
             } catch (e) {
                 alert('Failed to download save: ' + e.message);
             }
@@ -184,6 +259,11 @@
                 files: {}
             };
 
+            if (!unityModule || !unityModule.FS) {
+                console.log('No Unity FS available for collecting save data');
+                return saveData;
+            }
+
             function walkDirectory(path) {
                 try {
                     const entries = unityModule.FS.readdir(path);
@@ -191,29 +271,54 @@
                         if (entry === '.' || entry === '..') continue;
                         
                         const fullPath = path === '/' ? `/${entry}` : `${path}/${entry}`;
-                        const stat = unityModule.FS.stat(fullPath);
                         
-                        if (unityModule.FS.isDir(stat.mode)) {
-                            walkDirectory(fullPath);
-                        } else {
-                            // Read file and encode as base64
-                            const data = unityModule.FS.readFile(fullPath);
-                            saveData.files[fullPath] = btoa(String.fromCharCode(...data));
+                        try {
+                            const stat = unityModule.FS.stat(fullPath);
+                            
+                            if (unityModule.FS.isDir(stat.mode)) {
+                                walkDirectory(fullPath);
+                            } else {
+                                // Read file and encode as base64
+                                const data = unityModule.FS.readFile(fullPath);
+                                saveData.files[fullPath] = btoa(String.fromCharCode(...data));
+                                console.log('Collected save file:', fullPath);
+                            }
+                        } catch (e) {
+                            console.log('Could not process:', fullPath, e.message);
                         }
                     }
                 } catch (e) {
-                    // Ignore read errors
+                    console.log('Could not read directory:', path, e.message);
                 }
             }
 
-            walkDirectory('/idbfs');
+            // Try multiple common save locations
+            const savePaths = ['/idbfs', '/saves', '/userdata', '/.config'];
+            for (const path of savePaths) {
+                try {
+                    if (unityModule.FS.analyzePath(path).exists) {
+                        console.log('Checking save path:', path);
+                        walkDirectory(path);
+                    }
+                } catch (e) {
+                    // Path doesn't exist, continue
+                }
+            }
+
+            // Also try reading root directory for any save files
+            try {
+                walkDirectory('/');
+            } catch (e) {
+                console.log('Could not scan root directory');
+            }
+
             return saveData;
         }
 
         // Upload save from file
         function uploadSave() {
-            if (!saveReady || !unityModule) {
-                alert('Save system not ready. Please wait for the game to fully load.');
+            if (!saveReady) {
+                alert('Save system is still initializing. Please wait a moment and try again.');
                 return;
             }
 
@@ -244,19 +349,24 @@
 
         // Copy save to clipboard
         async function copySave() {
-            if (!saveReady || !unityModule) {
-                alert('Save system not ready. Please wait for the game to fully load.');
+            if (!saveReady) {
+                alert('Save system is still initializing. Please wait a moment and try again.');
                 return;
             }
 
             try {
-                unityModule.FS.syncfs(false, async () => {
+                const performCopy = async () => {
                     const saveData = collectSaveData();
                     const json = JSON.stringify(saveData, null, 2);
                     
+                    if (!saveData.files || Object.keys(saveData.files).length === 0) {
+                        alert('No save data found. Make sure you have saved progress in the game first.');
+                        return;
+                    }
+                    
                     if (navigator.clipboard) {
                         await navigator.clipboard.writeText(json);
-                        alert('Save data copied to clipboard!');
+                        alert(`Save data copied to clipboard! Found ${Object.keys(saveData.files).length} save files.`);
                     } else {
                         // Fallback for older browsers
                         const textarea = document.createElement('textarea');
@@ -265,9 +375,16 @@
                         textarea.select();
                         document.execCommand('copy');
                         document.body.removeChild(textarea);
-                        alert('Save data copied to clipboard!');
+                        alert(`Save data copied to clipboard! Found ${Object.keys(saveData.files).length} save files.`);
                     }
-                });
+                };
+
+                if (unityModule && unityModule.FS && unityModule.FS.syncfs) {
+                    unityModule.FS.syncfs(false, performCopy);
+                } else {
+                    console.log('No syncfs available, copying current state');
+                    await performCopy();
+                }
             } catch (e) {
                 alert('Failed to copy save: ' + e.message);
             }
@@ -275,8 +392,8 @@
 
         // Paste save from clipboard
         async function pasteSave() {
-            if (!saveReady || !unityModule) {
-                alert('Save system not ready. Please wait for the game to fully load.');
+            if (!saveReady) {
+                alert('Save system is still initializing. Please wait a moment and try again.');
                 return;
             }
 
@@ -447,9 +564,17 @@
                     // Initialize save system
                     initSaveSystem(unityInstance);
                     
-                    // Show save control overlay
+                    // Show save control overlay immediately
                     const controls = document.getElementById('hk-save-controls');
                     controls.style.display = 'block';
+                    
+                    // Set a backup timer to mark save system ready in case Unity FS detection fails
+                    setTimeout(() => {
+                        if (!saveReady) {
+                            console.log('Backup: Marking save system as ready after timeout');
+                            saveReady = true;
+                        }
+                    }, 5000); // 5 second fallback
                     
                     // Wire up save system buttons
                     document.getElementById('hk-download').addEventListener('click', downloadSave);

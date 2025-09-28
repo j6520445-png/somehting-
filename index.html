@@ -577,10 +577,22 @@
                     }, 5000); // 5 second fallback
                     
                     // Wire up save system buttons
-                    document.getElementById('hk-download').addEventListener('click', downloadSave);
-                    document.getElementById('hk-upload').addEventListener('click', uploadSave);
-                    document.getElementById('hk-copy').addEventListener('click', copySave);
-                    document.getElementById('hk-paste').addEventListener('click', pasteSave);
+                    document.getElementById('hk-download').addEventListener('click', () => {
+                        console.log('Download button clicked');
+                        downloadSave();
+                    });
+                    document.getElementById('hk-upload').addEventListener('click', () => {
+                        console.log('Upload button clicked');
+                        uploadSave();
+                    });
+                    document.getElementById('hk-copy').addEventListener('click', () => {
+                        console.log('Copy button clicked');
+                        copySave();
+                    });
+                    document.getElementById('hk-paste').addEventListener('click', () => {
+                        console.log('Paste button clicked');
+                        pasteSave();
+                    });
                     document.getElementById('hk-file-input').addEventListener('change', handleFileUpload);
                     
                     // Wire up new tab button

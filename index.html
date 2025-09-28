@@ -69,6 +69,15 @@
       return parts;
     }
 
+    // Helper: Uint8Array -> base64
+    function hkUint8ToBase64(u8) {
+      const CHUNK = 0x8000; let result = '';
+      for (let i = 0; i < u8.length; i += CHUNK) {
+        result += String.fromCharCode.apply(null, u8.subarray(i, i + CHUNK));
+      }
+      return btoa(result);
+    }
+
     // Simple localStorage save system for school environments
     function setupLocalStorageSaves(unityInstance) {
       const SAVE_KEY = 'hollow_knight_save_data';
@@ -114,7 +123,8 @@
                         const fullPath = path + '/' + file;
                         const stats = Module.FS.stat(fullPath);
                         if (!Module.FS.isDir(stats.mode)) {
-                          const fileData = Module.FS.readFile(fullPath, { encoding: 'base64' });
+                          const bytes = Module.FS.readFile(fullPath); // Uint8Array
+                          const fileData = hkUint8ToBase64(bytes);
                           saveData[fullPath] = fileData;
                         }
                       } catch (e) { /* File read failed, skip */ }
@@ -128,9 +138,10 @@
               
             } else {
               // Fallback: just save a timestamp to show the system is working
+              const prev = JSON.parse(localStorage.getItem(SAVE_KEY) || '{}');
               const saveData = {
                 timestamp: Date.now(),
-                sessions: (JSON.parse(localStorage.getItem(SAVE_KEY) || '{}')).sessions || 0 + 1,
+                sessions: (prev.sessions || 0) + 1,
                 fallback_mode: true
               };
               localStorage.setItem(SAVE_KEY, JSON.stringify(saveData));
@@ -223,19 +234,18 @@
       const script = document.createElement("script");
       script.src = loaderUrl;
       script.onload = () => {
-              createUnityInstance(canvas, config, (progress) => {
-        progressBarFull.style.width = 100 * progress + "%";
-      }).then((unityInstance) => {
-        loadingBar.style.display = "none";
-        fullscreenButton.onclick = () => {
-          unityInstance.SetFullscreen(1);
-        };
-        
-        // Setup localStorage save system
-        setupLocalStorageSaves(unityInstance);
-      }).catch((message) => {
-        alert(message);
-      });
+        createUnityInstance(canvas, config, (progress) => {
+          progressBarFull.style.width = 100 * progress + "%";
+        }).then((unityInstance) => {
+          loadingBar.style.display = "none";
+          // Optional fullscreen via 'F' key to replace missing button
+          window.addEventListener('keydown', (e) => { if ((e.key || '').toLowerCase() === 'f') unityInstance.SetFullscreen(1); });
+          
+          // Setup localStorage save system
+          setupLocalStorageSaves(unityInstance);
+        }).catch((message) => {
+          alert(message);
+        });
       };
       document.body.appendChild(script);
     })();

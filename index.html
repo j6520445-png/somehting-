@@ -58,8 +58,9 @@
     <div id="loading-text" style="color: white; font-size: 48px; font-family: cursive; text-align: center; margin-top: 20px;"> LOADING... </div>
         <!-- Export/Import controls (work entirely inside iframe) -->
         <div id="hk-save-controls" title="Download or load your save">
-            <button id="hk-export">Export Save</button>
+            <button id="hk-export">Download Save</button>
             <button id="hk-import">Import Save</button>
+            <button id="hk-newtab">Open in New Tab</button>
             <input id="hk-file" type="file" accept="application/json,.json" style="display:none" />
         </div>
     <div hidden id="unity-container" class="unity-desktop">
@@ -209,6 +210,10 @@
                 const root = '/idbfs';
                 const files = hkListFilesRecursive(FS, root);
                 const payload = { version: 1, createdAt: new Date().toISOString(), files: [] };
+                if (!files || files.length === 0) {
+                    // Still provide a minimal file so the user gets feedback
+                    payload.note = 'No save files were found. Create a save in-game, then try again.';
+                }
                 for (const path of files) {
                     try {
                         const data = FS.readFile(path, { encoding: 'binary' });
@@ -224,7 +229,9 @@
                 a.download = `hk-save-${ts}.json`;
                 document.body.appendChild(a);
                 a.click();
-                setTimeout(() => { URL.revokeObjectURL(url); document.body.removeChild(a); }, 0);
+                // Fallback: open in a new tab in case downloads are blocked in iframes
+                try { window.open(url, '_blank'); } catch {}
+                setTimeout(() => { URL.revokeObjectURL(url); document.body.removeChild(a); }, 5000);
             } catch (e) {
                 alert('Export failed: ' + (e && e.message ? e.message : e));
             }
@@ -370,6 +377,7 @@
                     const controls = document.getElementById('hk-save-controls');
                     const btnExport = document.getElementById('hk-export');
                     const btnImport = document.getElementById('hk-import');
+                    const btnNewTab = document.getElementById('hk-newtab');
                     const fileInput = document.getElementById('hk-file');
                     controls.style.display = 'block';
                     btnExport.addEventListener('click', () => hkExportSave());
@@ -378,6 +386,17 @@
                         const f = e.target.files && e.target.files[0];
                         if (f) hkImportSave(f);
                         e.target.value = '';
+                    });
+                    btnNewTab.addEventListener('click', () => {
+                        const targetUrl = 'https://j6520445-png.github.io/somehting-/index.html';
+                        const w = window.open('about:blank', '_blank');
+                        if (!w) { alert('Popup blocked by the browser. Allow popups for this site.'); return; }
+                        try {
+                            w.document.write(`<!doctype html><html><head><title>Loading…</title><meta http-equiv="refresh" content="0;url=${targetUrl}"></head><body style="background:#111;color:#fff;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;">Opening game…</body></html>`);
+                            w.document.close();
+                        } catch {
+                            try { w.location.href = targetUrl; } catch {}
+                        }
                     });
                 }).catch((message) => {
                     alert(message);

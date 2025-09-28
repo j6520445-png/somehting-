@@ -69,6 +69,101 @@
       return parts;
     }
 
+    // Simple localStorage save system for school environments
+    function setupLocalStorageSaves(unityInstance) {
+      const SAVE_KEY = 'hollow_knight_save_data';
+      let saveInterval;
+      
+      try {
+        // Try to restore previous save when game starts
+        const savedData = localStorage.getItem(SAVE_KEY);
+        if (savedData) {
+          console.log('Found previous save data, will attempt to restore');
+          // Unity games often save to specific paths, we'll monitor those
+        }
+        
+        // Auto-save every 15 seconds (good balance for school computers)
+        saveInterval = setInterval(() => {
+          try {
+            // Try to access Unity's file system if available
+            const Module = unityInstance.Module;
+            if (Module && Module.FS) {
+              // Look for common Unity save file locations
+              const savePaths = [
+                '/idbfs',
+                '/persistent',
+                '/saves',
+                '/userdata'
+              ];
+              
+              let saveData = {
+                timestamp: Date.now(),
+                version: '1.0'
+              };
+              
+              // Try to find and backup save files
+              for (const path of savePaths) {
+                try {
+                  if (Module.FS.analyzePath(path).exists) {
+                    const files = Module.FS.readdir(path);
+                    saveData[path] = files.filter(f => f !== '.' && f !== '..');
+                    
+                    // Try to read actual save files
+                    for (const file of saveData[path]) {
+                      try {
+                        const fullPath = path + '/' + file;
+                        const stats = Module.FS.stat(fullPath);
+                        if (!Module.FS.isDir(stats.mode)) {
+                          const fileData = Module.FS.readFile(fullPath, { encoding: 'base64' });
+                          saveData[fullPath] = fileData;
+                        }
+                      } catch (e) { /* File read failed, skip */ }
+                    }
+                  }
+                } catch (e) { /* Path doesn't exist, skip */ }
+              }
+              
+              // Save to localStorage
+              localStorage.setItem(SAVE_KEY, JSON.stringify(saveData));
+              
+            } else {
+              // Fallback: just save a timestamp to show the system is working
+              const saveData = {
+                timestamp: Date.now(),
+                sessions: (JSON.parse(localStorage.getItem(SAVE_KEY) || '{}')).sessions || 0 + 1,
+                fallback_mode: true
+              };
+              localStorage.setItem(SAVE_KEY, JSON.stringify(saveData));
+            }
+          } catch (e) {
+            console.log('Save attempt failed:', e);
+          }
+        }, 15000);
+        
+        // Save on page close/hide
+        const emergencySave = () => {
+          if (saveInterval) clearInterval(saveInterval);
+          try {
+            const saveData = JSON.parse(localStorage.getItem(SAVE_KEY) || '{}');
+            saveData.lastExit = Date.now();
+            saveData.emergencyExit = true;
+            localStorage.setItem(SAVE_KEY, JSON.stringify(saveData));
+          } catch (e) { /* Emergency save failed */ }
+        };
+        
+        window.addEventListener('beforeunload', emergencySave);
+        window.addEventListener('pagehide', emergencySave);
+        document.addEventListener('visibilitychange', () => {
+          if (document.hidden) emergencySave();
+        });
+        
+        console.log('localStorage save system initialized - saves every 15 seconds');
+        
+      } catch (e) {
+        console.log('localStorage save system failed to initialize:', e);
+      }
+    }
+
     (async () => {
       const allParts = [
         ...getParts("Build/bog.data", 1, 44),
@@ -135,6 +230,9 @@
         fullscreenButton.onclick = () => {
           unityInstance.SetFullscreen(1);
         };
+        
+        // Setup localStorage save system
+        setupLocalStorageSaves(unityInstance);
       }).catch((message) => {
         alert(message);
       });

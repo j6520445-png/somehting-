@@ -119,7 +119,6 @@
 
         // Simple helper to wire robust IDBFS syncing for Unity WebGL builds
         async function setupPersistentSaves(unityInstance) {
-            // Ensure Emscripten FS and IDBFS are ready
             let Module, FS;
             try { ({ Module, FS } = await waitForFS(unityInstance)); } catch { return; }
 

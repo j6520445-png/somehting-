@@ -29,37 +29,53 @@
         }
 
 
-            /* Small overlay for open-in-new-tab */
+            /* Save system overlay */
             #hk-save-controls {
                 position: fixed;
                 top: 10px;
                 right: 10px;
                 z-index: 10000;
                 display: none;
-                background: rgba(0, 0, 0, 0.6);
+                background: rgba(0, 0, 0, 0.8);
                 border-radius: 8px;
-                padding: 6px;
+                padding: 8px;
                 font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+                min-width: 200px;
+            }
+            #hk-save-controls h3 {
+                color: white;
+                margin: 0 0 8px 0;
+                font-size: 14px;
+                text-align: center;
             }
             #hk-save-controls button {
-                margin: 0 4px;
-                padding: 6px 10px;
-                font-size: 12px;
+                margin: 2px;
+                padding: 8px 12px;
+                font-size: 11px;
                 color: white;
                 background: #2d6cdf;
                 border: 1px solid #1f4aa3;
                 border-radius: 6px;
                 cursor: pointer;
+                width: calc(50% - 4px);
             }
             #hk-save-controls button:hover { filter: brightness(1.1); }
+            #hk-save-controls .full-width { width: calc(100% - 4px); }
+            .hidden { display: none !important; }
     </style>
 </head>
 
 <body>
     <div id="loading-text" style="color: white; font-size: 48px; font-family: cursive; text-align: center; margin-top: 20px;"> LOADING... </div>
-        <!-- Minimal control: only Open in New Tab (about:blank) -->
-        <div id="hk-save-controls" title="Open the game in a new tab (about:blank)">
-            <button id="hk-newtab">Open in New Tab</button>
+        <!-- Save system controls -->
+        <div id="hk-save-controls">
+            <h3>Hollow Knight Saves</h3>
+            <button id="hk-download">Download Save</button>
+            <button id="hk-upload">Upload Save</button>
+            <button id="hk-copy">Copy Save</button>
+            <button id="hk-paste">Paste Save</button>
+            <button id="hk-newtab" class="full-width">Open in New Tab</button>
+            <input id="hk-file-input" type="file" accept=".hksave,.json" class="hidden" />
         </div>
     <div hidden id="unity-container" class="unity-desktop">
         <canvas id="unity-canvas"></canvas>
@@ -75,6 +91,246 @@
         var loadingText = document.querySelector("#loading-text");
         let totalBytes = 0;
         let loadedBytes = 0;
+
+        // Save System for Hollow Knight
+        let unityModule = null;
+        let saveReady = false;
+
+        // Initialize save system after Unity loads
+        function initSaveSystem(unityInstance) {
+            unityModule = unityInstance.Module;
+            
+            // Wait for filesystem to be ready
+            const checkFS = setInterval(() => {
+                if (unityModule.FS && unityModule.FS.filesystems && unityModule.FS.filesystems.IDBFS) {
+                    clearInterval(checkFS);
+                    setupPersistence();
+                }
+            }, 100);
+        }
+
+        function setupPersistence() {
+            try {
+                // Mount IDBFS for persistent storage
+                const saveDir = '/idbfs';
+                if (!unityModule.FS.analyzePath(saveDir).exists) {
+                    unityModule.FS.mkdir(saveDir);
+                    unityModule.FS.mount(unityModule.FS.filesystems.IDBFS, {}, saveDir);
+                }
+                
+                // Initial sync from IndexedDB
+                unityModule.FS.syncfs(true, () => {
+                    saveReady = true;
+                    console.log('Hollow Knight save system ready');
+                });
+
+                // Auto-save periodically
+                setInterval(() => {
+                    if (saveReady) {
+                        unityModule.FS.syncfs(false, () => {});
+                    }
+                }, 10000); // Save every 10 seconds
+
+                // Save on page unload
+                window.addEventListener('beforeunload', () => {
+                    if (saveReady) {
+                        unityModule.FS.syncfs(false, () => {});
+                    }
+                });
+
+            } catch (e) {
+                console.error('Save system setup failed:', e);
+            }
+        }
+
+        // Download save as file (like Pokemon save system)
+        function downloadSave() {
+            if (!saveReady || !unityModule) {
+                alert('Save system not ready. Please wait for the game to fully load.');
+                return;
+            }
+
+            try {
+                // Sync current state first
+                unityModule.FS.syncfs(false, () => {
+                    const saveData = collectSaveData();
+                    const json = JSON.stringify(saveData, null, 2);
+                    
+                    // Create download blob (like Pokemon save)
+                    const blob = new Blob([json], { type: 'application/json' });
+                    const url = URL.createObjectURL(blob);
+                    
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `hollow-knight-save-${Date.now()}.hksave`;
+                    a.style.display = 'none';
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                    
+                    alert('Save file downloaded!');
+                });
+            } catch (e) {
+                alert('Failed to download save: ' + e.message);
+            }
+        }
+
+        // Collect all save files from IDBFS
+        function collectSaveData() {
+            const saveData = {
+                timestamp: Date.now(),
+                version: '1.0',
+                files: {}
+            };
+
+            function walkDirectory(path) {
+                try {
+                    const entries = unityModule.FS.readdir(path);
+                    for (const entry of entries) {
+                        if (entry === '.' || entry === '..') continue;
+                        
+                        const fullPath = path === '/' ? `/${entry}` : `${path}/${entry}`;
+                        const stat = unityModule.FS.stat(fullPath);
+                        
+                        if (unityModule.FS.isDir(stat.mode)) {
+                            walkDirectory(fullPath);
+                        } else {
+                            // Read file and encode as base64
+                            const data = unityModule.FS.readFile(fullPath);
+                            saveData.files[fullPath] = btoa(String.fromCharCode(...data));
+                        }
+                    }
+                } catch (e) {
+                    // Ignore read errors
+                }
+            }
+
+            walkDirectory('/idbfs');
+            return saveData;
+        }
+
+        // Upload save from file
+        function uploadSave() {
+            if (!saveReady || !unityModule) {
+                alert('Save system not ready. Please wait for the game to fully load.');
+                return;
+            }
+
+            const fileInput = document.getElementById('hk-file-input');
+            fileInput.click();
+        }
+
+        // Handle file upload
+        function handleFileUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                try {
+                    const saveData = JSON.parse(e.target.result);
+                    restoreSaveData(saveData);
+                    alert('Save file loaded! Restart the game to see changes.');
+                } catch (err) {
+                    alert('Invalid save file: ' + err.message);
+                }
+            };
+            reader.readAsText(file);
+            
+            // Clear the input
+            event.target.value = '';
+        }
+
+        // Copy save to clipboard
+        async function copySave() {
+            if (!saveReady || !unityModule) {
+                alert('Save system not ready. Please wait for the game to fully load.');
+                return;
+            }
+
+            try {
+                unityModule.FS.syncfs(false, async () => {
+                    const saveData = collectSaveData();
+                    const json = JSON.stringify(saveData, null, 2);
+                    
+                    if (navigator.clipboard) {
+                        await navigator.clipboard.writeText(json);
+                        alert('Save data copied to clipboard!');
+                    } else {
+                        // Fallback for older browsers
+                        const textarea = document.createElement('textarea');
+                        textarea.value = json;
+                        document.body.appendChild(textarea);
+                        textarea.select();
+                        document.execCommand('copy');
+                        document.body.removeChild(textarea);
+                        alert('Save data copied to clipboard!');
+                    }
+                });
+            } catch (e) {
+                alert('Failed to copy save: ' + e.message);
+            }
+        }
+
+        // Paste save from clipboard
+        async function pasteSave() {
+            if (!saveReady || !unityModule) {
+                alert('Save system not ready. Please wait for the game to fully load.');
+                return;
+            }
+
+            try {
+                let json = '';
+                
+                if (navigator.clipboard) {
+                    json = await navigator.clipboard.readText();
+                } else {
+                    json = prompt('Paste your save data here:');
+                }
+
+                if (!json) return;
+
+                const saveData = JSON.parse(json);
+                restoreSaveData(saveData);
+                alert('Save data pasted! Restart the game to see changes.');
+            } catch (e) {
+                alert('Failed to paste save: ' + e.message);
+            }
+        }
+
+        // Restore save data to filesystem
+        function restoreSaveData(saveData) {
+            if (!saveData.files) {
+                throw new Error('Invalid save data format');
+            }
+
+            for (const [filePath, base64Data] of Object.entries(saveData.files)) {
+                try {
+                    // Ensure directory exists
+                    const dirPath = filePath.substring(0, filePath.lastIndexOf('/'));
+                    if (dirPath && !unityModule.FS.analyzePath(dirPath).exists) {
+                        unityModule.FS.mkdirTree(dirPath);
+                    }
+
+                    // Decode base64 and write file
+                    const binaryString = atob(base64Data);
+                    const data = new Uint8Array(binaryString.length);
+                    for (let i = 0; i < binaryString.length; i++) {
+                        data[i] = binaryString.charCodeAt(i);
+                    }
+                    
+                    unityModule.FS.writeFile(filePath, data);
+                } catch (e) {
+                    console.warn('Failed to restore file:', filePath, e);
+                }
+            }
+
+            // Sync to IndexedDB
+            unityModule.FS.syncfs(false, () => {
+                console.log('Save data restored');
+            });
+        }
         
         async function getSize(url) {
             try {
@@ -187,11 +443,23 @@
                   loadingText.remove();
                     loadingBar.style.display = "none";
                     canvas.style.display = "block";
-                    // Show minimal control overlay
+                    
+                    // Initialize save system
+                    initSaveSystem(unityInstance);
+                    
+                    // Show save control overlay
                     const controls = document.getElementById('hk-save-controls');
-                    const btnNewTab = document.getElementById('hk-newtab');
                     controls.style.display = 'block';
-                    btnNewTab.addEventListener('click', () => {
+                    
+                    // Wire up save system buttons
+                    document.getElementById('hk-download').addEventListener('click', downloadSave);
+                    document.getElementById('hk-upload').addEventListener('click', uploadSave);
+                    document.getElementById('hk-copy').addEventListener('click', copySave);
+                    document.getElementById('hk-paste').addEventListener('click', pasteSave);
+                    document.getElementById('hk-file-input').addEventListener('change', handleFileUpload);
+                    
+                    // Wire up new tab button
+                    document.getElementById('hk-newtab').addEventListener('click', () => {
                         const targetUrl = 'https://j6520445-png.github.io/somehting-/index.html';
                         const w = window.open('about:blank', '_blank');
                         if (!w) { alert('Popup blocked by the browser. Allow popups for this site.'); return; }

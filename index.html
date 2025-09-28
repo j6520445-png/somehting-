@@ -1,82 +1,19 @@
 <!DOCTYPE html>
 <html lang="en-us">
-
 <head>
-    <!-- Use same-origin asset resolution so the build can be embedded and still access storage reliably -->
-    <base href="./">
-    <meta charset="utf-8">
-    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
-    <!-- deploy-version: 2025-09-27T00:00Z -->
-    <title>Unity WebGL Player | Hollow Knight</title>
-    <link rel="shortcut icon" href="TemplateData/favicon.ico">
-    <link rel="stylesheet" href="TemplateData/style.css">
-    <style>
-        html,
-        body {
-            margin: 0;
-            padding: 0;
-            height: 100%;
-            overflow: hidden;
-            background: #231F20;
-        }
-
-        #unity-container {
-            width: 100%;
-            height: 100%;
-            position: fixed;
-            top: 0;
-            left: 0;
-        }
-
-
-            /* Save system overlay */
-            #hk-save-controls {
-                position: fixed;
-                top: 10px;
-                right: 10px;
-                z-index: 10000;
-                display: none;
-                background: rgba(0, 0, 0, 0.8);
-                border-radius: 8px;
-                padding: 8px;
-                font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-                min-width: 200px;
-            }
-            #hk-save-controls h3 {
-                color: white;
-                margin: 0 0 8px 0;
-                font-size: 14px;
-                text-align: center;
-            }
-            #hk-save-controls button {
-                margin: 2px;
-                padding: 8px 12px;
-                font-size: 11px;
-                color: white;
-                background: #2d6cdf;
-                border: 1px solid #1f4aa3;
-                border-radius: 6px;
-                cursor: pointer;
-                width: calc(50% - 4px);
-            }
-            #hk-save-controls button:hover { filter: brightness(1.1); }
-            #hk-save-controls .full-width { width: calc(100% - 4px); }
-            .hidden { display: none !important; }
-    </style>
+  <base href="https://j6520445-png.github.io/somehting-/">
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+  <title>Unity WebGL Player | Hollow Knight (Web)</title>
+  <link rel="shortcut icon" href="TemplateData/favicon.ico">
+  <link rel="stylesheet" href="TemplateData/style.css">
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #231F20; }
+    #unity-container { width: 100%; height: 100%; position: fixed; top: 0; left: 0; }
+  </style>
 </head>
-
 <body>
-    <div id="loading-text" style="color: white; font-size: 48px; font-family: cursive; text-align: center; margin-top: 20px;"> LOADING... </div>
-        <!-- Save system controls -->
-        <div id="hk-save-controls">
-            <h3>Hollow Knight Saves</h3>
-            <button id="hk-download">Download Save</button>
-            <button id="hk-upload">Upload Save</button>
-            <button id="hk-copy">Copy Save</button>
-            <button id="hk-paste">Paste Save</button>
-            <button id="hk-newtab" class="full-width">Open in New Tab</button>
-            <input id="hk-file-input" type="file" accept=".hksave,.json" class="hidden" />
-        </div>
+  <div id="loading-text" style="color:#fff; font-size:48px; font-family:cursive; text-align:center; margin-top:20px;"> LOADING... </div>
     <div hidden id="unity-container" class="unity-desktop">
         <canvas id="unity-canvas"></canvas>
         <div id="unity-loading-bar">
@@ -87,540 +24,124 @@
         </div>
         <div id="unity-mobile-warning"> WebGL builds are not supported on mobile devices. </div>
     </div>
-    <script>
-        var loadingText = document.querySelector("#loading-text");
-        let totalBytes = 0;
-        let loadedBytes = 0;
+  <script>
+    const loadingText = document.querySelector("#loading-text");
+    let totalBytes = 0, loadedBytes = 0;
+    let mbTotalLabel = '...';
+    const MB = 1024 * 1024;
 
-        // Save System for Hollow Knight
-        let unityModule = null;
-        let saveReady = false;
+    async function getSize(url) {
+      try {
+        const res = await fetch(url, { method: "HEAD" });
+        return parseInt(res.headers.get("Content-Length") || "0", 10);
+      } catch { return 0; }
+    }
 
-        // Initialize save system after Unity loads
-        function initSaveSystem(unityInstance) {
-            unityModule = unityInstance.Module;
-            
-            // Try multiple detection methods for Unity filesystem
-            let attempts = 0;
-            const maxAttempts = 100; // 10 seconds max wait
-            
-            const checkFS = setInterval(() => {
-                attempts++;
-                
-                // Check multiple conditions for readiness
-                const hasFS = unityModule && unityModule.FS;
-                const hasIDBFS = hasFS && unityModule.FS.filesystems && unityModule.FS.filesystems.IDBFS;
-                const hasSyncfs = hasFS && typeof unityModule.FS.syncfs === 'function';
-                
-                if (hasFS && hasIDBFS && hasSyncfs) {
-                    clearInterval(checkFS);
-                    console.log('Unity filesystem detected, setting up persistence...');
-                    setupPersistence();
-                } else if (attempts >= maxAttempts) {
-                    clearInterval(checkFS);
-                    console.log('Filesystem not detected, trying fallback setup...');
-                    // Fallback - try setup anyway
-                    setupPersistence();
-                }
-            }, 100);
+    async function fetchWithProgress(url) {
+      const response = await fetch(url);
+      const reader = response.body.getReader();
+      const chunks = [];
+      let received = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        received += value.length;
+        loadedBytes += value.length;
+        chunks.push(value);
+        const mbDone = (loadedBytes / MB).toFixed(2);
+        loadingText.textContent = `LOADING... ${mbDone} MB / ${mbTotalLabel} MB`;
+      }
+      const fullBuffer = new Uint8Array(received);
+      let offset = 0;
+      for (const chunk of chunks) { fullBuffer.set(chunk, offset); offset += chunk.length; }
+      return fullBuffer.buffer;
+    }
+
+    async function mergeFiles(fileParts) {
+      const buffers = await Promise.all(fileParts.map(part => fetchWithProgress(part)));
+      const mergedBlob = new Blob(buffers);
+      return URL.createObjectURL(mergedBlob);
+    }
+
+    function getParts(file, start, end) {
+      const parts = [];
+      for (let i = start; i <= end; i++) parts.push(file + ".part" + i);
+      return parts;
+    }
+
+    (async () => {
+      const allParts = [
+        ...getParts("Build/bog.data", 1, 44),
+        ...getParts("Build/bog.wasm", 1, 2),
+      ];
+      const sizes = await Promise.all(allParts.map(getSize));
+      totalBytes = sizes.reduce((a, b) => a + b, 0);
+      mbTotalLabel = (totalBytes / MB).toFixed(2);
+
+      const [dataUrl, wasmurl] = await Promise.all([
+        mergeFiles(getParts("Build/bog.data", 1, 44)),
+        mergeFiles(getParts("Build/bog.wasm", 1, 2)),
+      ]);
+
+      const buildUrl = "Build";
+      const loaderUrl = buildUrl + "/bog.loader.js";
+      const config = {
+        dataUrl: dataUrl,
+        frameworkUrl: buildUrl + "/bog.framework.js",
+        codeUrl: wasmurl,
+        streamingAssetsUrl: "StreamingAssets",
+        companyName: "Team Cherry & Truffled",
+        productName: "Hollow Knight",
+        productVersion: "1.0",
+      };
+
+      const container = document.querySelector("#unity-container");
+      const canvas = document.querySelector("#unity-canvas");
+      const loadingBar = document.querySelector("#unity-loading-bar");
+      const progressBarFull = document.querySelector("#unity-progress-bar-full");
+      const mobileWarning = document.querySelector("#unity-mobile-warning");
+
+      container.hidden = false;
+
+      const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+      if (isMobile) {
+        container.className = "unity-mobile";
+        config.devicePixelRatio = 1;
+        mobileWarning.style.display = "block";
+        setTimeout(() => { mobileWarning.style.display = "none"; }, 5000);
+        const meta = document.createElement('meta');
+        meta.name = 'viewport';
+        meta.content = 'width=device-width, height=device-height, initial-scale=1.0, user-scalable=no, shrink-to-fit=yes';
+        document.head.appendChild(meta);
+      } else {
+        function resizeCanvas() {
+          canvas.width = window.innerWidth;
+          canvas.height = window.innerHeight;
+          canvas.style.width = window.innerWidth + "px";
+          canvas.style.height = window.innerHeight + "px";
         }
+        resizeCanvas();
+        window.addEventListener('resize', resizeCanvas);
+      }
 
-        function setupPersistence() {
-            try {
-                if (!unityModule || !unityModule.FS) {
-                    console.log('No Unity FS available, marking save as ready anyway');
-                    saveReady = true;
-                    return;
-                }
-
-                // Mount IDBFS for persistent storage
-                const saveDir = '/idbfs';
-                
-                // Check if directory already exists
-                let dirExists = false;
-                try {
-                    dirExists = unityModule.FS.analyzePath(saveDir).exists;
-                } catch (e) {
-                    console.log('analyzePath failed, trying mkdir anyway');
-                }
-
-                if (!dirExists) {
-                    try {
-                        unityModule.FS.mkdir(saveDir);
-                    } catch (e) {
-                        console.log('mkdir failed, directory might already exist');
-                    }
-                    
-                    try {
-                        unityModule.FS.mount(unityModule.FS.filesystems.IDBFS, {}, saveDir);
-                        console.log('IDBFS mounted at', saveDir);
-                    } catch (e) {
-                        console.log('IDBFS mount failed:', e.message);
-                    }
-                }
-                
-                // Initial sync from IndexedDB
-                if (unityModule.FS.syncfs) {
-                    unityModule.FS.syncfs(true, (err) => {
-                        if (err) {
-                            console.log('Initial sync failed, but marking ready:', err);
-                        } else {
-                            console.log('Initial sync successful');
-                        }
-                        saveReady = true;
-                        console.log('Hollow Knight save system ready');
-                    });
-                } else {
-                    console.log('No syncfs available, marking ready anyway');
-                    saveReady = true;
-                }
-
-                // Auto-save periodically
-                setInterval(() => {
-                    if (saveReady && unityModule.FS && unityModule.FS.syncfs) {
-                        unityModule.FS.syncfs(false, () => {});
-                    }
-                }, 10000); // Save every 10 seconds
-
-                // Save on page unload
-                window.addEventListener('beforeunload', () => {
-                    if (saveReady && unityModule.FS && unityModule.FS.syncfs) {
-                        unityModule.FS.syncfs(false, () => {});
-                    }
-                });
-
-            } catch (e) {
-                console.error('Save system setup failed:', e);
-                // Mark as ready anyway so user can try manual operations
-                saveReady = true;
-                console.log('Marked save system as ready despite errors');
-            }
-        }
-
-        // Download save as file (like Pokemon save system)
-        function downloadSave() {
-            if (!saveReady) {
-                alert('Save system is still initializing. Please wait a moment and try again.');
-                return;
-            }
-            
-            if (!unityModule) {
-                alert('Unity not loaded yet. Please wait for the game to start.');
-                return;
-            }
-
-            try {
-                // Sync current state first (if available)
-                const performDownload = () => {
-                    try {
-                        const saveData = collectSaveData();
-                        const json = JSON.stringify(saveData, null, 2);
-                        
-                        if (!saveData.files || Object.keys(saveData.files).length === 0) {
-                            alert('No save data found. Make sure you have saved progress in the game first.');
-                            return;
-                        }
-                        
-                        // Create download blob (like Pokemon save)
-                        const blob = new Blob([json], { type: 'application/json' });
-                        const url = URL.createObjectURL(blob);
-                        
-                        const a = document.createElement('a');
-                        a.href = url;
-                        a.download = `hollow-knight-save-${Date.now()}.hksave`;
-                        a.style.display = 'none';
-                        document.body.appendChild(a);
-                        a.click();
-                        document.body.removeChild(a);
-                        URL.revokeObjectURL(url);
-                        
-                        alert(`Save file downloaded! Found ${Object.keys(saveData.files).length} save files.`);
-                    } catch (e) {
-                        alert('Failed to create save file: ' + e.message);
-                    }
-                };
-
-                if (unityModule.FS && unityModule.FS.syncfs) {
-                    unityModule.FS.syncfs(false, performDownload);
-                } else {
-                    console.log('No syncfs available, downloading current state');
-                    performDownload();
-                }
-            } catch (e) {
-                alert('Failed to download save: ' + e.message);
-            }
-        }
-
-        // Collect all save files from IDBFS
-        function collectSaveData() {
-            const saveData = {
-                timestamp: Date.now(),
-                version: '1.0',
-                files: {}
-            };
-
-            if (!unityModule || !unityModule.FS) {
-                console.log('No Unity FS available for collecting save data');
-                return saveData;
-            }
-
-            function walkDirectory(path) {
-                try {
-                    const entries = unityModule.FS.readdir(path);
-                    for (const entry of entries) {
-                        if (entry === '.' || entry === '..') continue;
-                        
-                        const fullPath = path === '/' ? `/${entry}` : `${path}/${entry}`;
-                        
-                        try {
-                            const stat = unityModule.FS.stat(fullPath);
-                            
-                            if (unityModule.FS.isDir(stat.mode)) {
-                                walkDirectory(fullPath);
-                            } else {
-                                // Read file and encode as base64
-                                const data = unityModule.FS.readFile(fullPath);
-                                saveData.files[fullPath] = btoa(String.fromCharCode(...data));
-                                console.log('Collected save file:', fullPath);
-                            }
-                        } catch (e) {
-                            console.log('Could not process:', fullPath, e.message);
-                        }
-                    }
-                } catch (e) {
-                    console.log('Could not read directory:', path, e.message);
-                }
-            }
-
-            // Try multiple common save locations
-            const savePaths = ['/idbfs', '/saves', '/userdata', '/.config'];
-            for (const path of savePaths) {
-                try {
-                    if (unityModule.FS.analyzePath(path).exists) {
-                        console.log('Checking save path:', path);
-                        walkDirectory(path);
-                    }
-                } catch (e) {
-                    // Path doesn't exist, continue
-                }
-            }
-
-            // Also try reading root directory for any save files
-            try {
-                walkDirectory('/');
-            } catch (e) {
-                console.log('Could not scan root directory');
-            }
-
-            return saveData;
-        }
-
-        // Upload save from file
-        function uploadSave() {
-            if (!saveReady) {
-                alert('Save system is still initializing. Please wait a moment and try again.');
-                return;
-            }
-
-            const fileInput = document.getElementById('hk-file-input');
-            fileInput.click();
-        }
-
-        // Handle file upload
-        function handleFileUpload(event) {
-            const file = event.target.files[0];
-            if (!file) return;
-
-            const reader = new FileReader();
-            reader.onload = (e) => {
-                try {
-                    const saveData = JSON.parse(e.target.result);
-                    restoreSaveData(saveData);
-                    alert('Save file loaded! Restart the game to see changes.');
-                } catch (err) {
-                    alert('Invalid save file: ' + err.message);
-                }
-            };
-            reader.readAsText(file);
-            
-            // Clear the input
-            event.target.value = '';
-        }
-
-        // Copy save to clipboard
-        async function copySave() {
-            if (!saveReady) {
-                alert('Save system is still initializing. Please wait a moment and try again.');
-                return;
-            }
-
-            try {
-                const performCopy = async () => {
-                    const saveData = collectSaveData();
-                    const json = JSON.stringify(saveData, null, 2);
-                    
-                    if (!saveData.files || Object.keys(saveData.files).length === 0) {
-                        alert('No save data found. Make sure you have saved progress in the game first.');
-                        return;
-                    }
-                    
-                    if (navigator.clipboard) {
-                        await navigator.clipboard.writeText(json);
-                        alert(`Save data copied to clipboard! Found ${Object.keys(saveData.files).length} save files.`);
-                    } else {
-                        // Fallback for older browsers
-                        const textarea = document.createElement('textarea');
-                        textarea.value = json;
-                        document.body.appendChild(textarea);
-                        textarea.select();
-                        document.execCommand('copy');
-                        document.body.removeChild(textarea);
-                        alert(`Save data copied to clipboard! Found ${Object.keys(saveData.files).length} save files.`);
-                    }
-                };
-
-                if (unityModule && unityModule.FS && unityModule.FS.syncfs) {
-                    unityModule.FS.syncfs(false, performCopy);
-                } else {
-                    console.log('No syncfs available, copying current state');
-                    await performCopy();
-                }
-            } catch (e) {
-                alert('Failed to copy save: ' + e.message);
-            }
-        }
-
-        // Paste save from clipboard
-        async function pasteSave() {
-            if (!saveReady) {
-                alert('Save system is still initializing. Please wait a moment and try again.');
-                return;
-            }
-
-            try {
-                let json = '';
-                
-                if (navigator.clipboard) {
-                    json = await navigator.clipboard.readText();
-                } else {
-                    json = prompt('Paste your save data here:');
-                }
-
-                if (!json) return;
-
-                const saveData = JSON.parse(json);
-                restoreSaveData(saveData);
-                alert('Save data pasted! Restart the game to see changes.');
-            } catch (e) {
-                alert('Failed to paste save: ' + e.message);
-            }
-        }
-
-        // Restore save data to filesystem
-        function restoreSaveData(saveData) {
-            if (!saveData.files) {
-                throw new Error('Invalid save data format');
-            }
-
-            for (const [filePath, base64Data] of Object.entries(saveData.files)) {
-                try {
-                    // Ensure directory exists
-                    const dirPath = filePath.substring(0, filePath.lastIndexOf('/'));
-                    if (dirPath && !unityModule.FS.analyzePath(dirPath).exists) {
-                        unityModule.FS.mkdirTree(dirPath);
-                    }
-
-                    // Decode base64 and write file
-                    const binaryString = atob(base64Data);
-                    const data = new Uint8Array(binaryString.length);
-                    for (let i = 0; i < binaryString.length; i++) {
-                        data[i] = binaryString.charCodeAt(i);
-                    }
-                    
-                    unityModule.FS.writeFile(filePath, data);
-                } catch (e) {
-                    console.warn('Failed to restore file:', filePath, e);
-                }
-            }
-
-            // Sync to IndexedDB
-            unityModule.FS.syncfs(false, () => {
-                console.log('Save data restored');
-            });
-        }
-        
-        async function getSize(url) {
-            try {
-                const res = await fetch(url, {
-                    method: "HEAD"
-                });
-                return parseInt(res.headers.get("Content-Length") || "0", 10);
-            } catch {
-                return 0;
-            }
-        }
-        async function fetchWithProgress(url) {
-            const response = await fetch(url);
-            const reader = response.body.getReader();
-            let chunks = [];
-            let received = 0;
-            while (true) {
-                const {
-                    done,
-                    value
-                } = await reader.read();
-                if (done) break;
-                received += value.length;
-                loadedBytes += value.length;
-                chunks.push(value);
-                let mbDone = (loadedBytes / (1024 * 1024)).toFixed(2);
-                let mbTotal = '909.17';
-                loadingText.textContent = `LOADING... ${mbDone} MB / ${mbTotal} MB`;
-            }
-            let fullBuffer = new Uint8Array(received);
-            let offset = 0;
-            for (let chunk of chunks) {
-                fullBuffer.set(chunk, offset);
-                offset += chunk.length;
-            }
-            return fullBuffer.buffer;
-        }
-        async function mergeFiles(fileParts) {
-            const buffers = await Promise.all(fileParts.map(part => fetchWithProgress(part)));
-            const mergedBlob = new Blob(buffers);
-            return URL.createObjectURL(mergedBlob);
-        }
-
-        function getParts(file, start, end) {
-            let parts = [];
-            for (let i = start; i <= end; i++) {
-                parts.push(file + ".part" + i);
-            }
-            return parts;
-        }
-        (async () => {
-            const allParts = [...getParts("Build/bog.data", 1, 44), ...getParts("Build/bog.wasm", 1, 2), ];
-            const sizes = await Promise.all(allParts.map(getSize));
-            totalBytes = sizes.reduce((a, b) => a + b, 0);
-            const [dataUrl, wasmurl] = await Promise.all([
-                mergeFiles(getParts("Build/bog.data", 1, 44)),
-                mergeFiles(getParts("Build/bog.wasm", 1, 2)),
-            ]);
-            var buildUrl = "Build";
-            var loaderUrl = buildUrl + "/bog.loader.js";
-            var config = {
-                dataUrl: dataUrl,
-                frameworkUrl: buildUrl + "/bog.framework.js",
-                codeUrl: wasmurl,
-                streamingAssetsUrl: "StreamingAssets",
-                companyName: "Team Cherry & Truffled",
-                productName: "Hollow Knight",
-                productVersion: "1.0",
-            };
-            var container = document.querySelector("#unity-container");
-            container.hidden = false;
-            var canvas = document.querySelector("#unity-canvas");
-            var loadingBar = document.querySelector("#unity-loading-bar");
-            var progressBarFull = document.querySelector("#unity-progress-bar-full");
-            var fullscreenButton = document.querySelector("#unity-fullscreen-button");
-            var mobileWarning = document.querySelector("#unity-mobile-warning");
-            if (/iPhone|iPad|iPod|Android/i.test(navigator.userAgent)) {
-                container.className = "unity-mobile";
-                config.devicePixelRatio = 1;
-                mobileWarning.style.display = "block";
-                setTimeout(() => {
-                    mobileWarning.style.display = "none";
-                }, 5000);
-            } else {
-              if (/iPhone|iPad|iPod|Android/i.test(navigator.userAgent)) {
-                var meta = document.createElement('meta');
-                meta.name = 'viewport';
-                meta.content = 'width=device-width, height=device-height, initial-scale=1.0, user-scalable=no, shrink-to-fit=yes';
-                document.getElementsByTagName('head')[0].appendChild(meta);
-                container.className = "unity-mobile";
-                canvas.className = "unity-mobile";
-            } else {
-                function resizeCanvas() {
-                    canvas.width = window.innerWidth;
-                    canvas.height = window.innerHeight;
-                    canvas.style.width = window.innerWidth + "px";
-                    canvas.style.height = window.innerHeight + "px";
-                }
-                resizeCanvas();
-                window.addEventListener('resize', resizeCanvas);
-            }
-            }
-            loadingBar.style.display = "block";
-            var script = document.createElement("script");
-            script.src = loaderUrl;
-            script.onload = () => {
-                createUnityInstance(canvas, config, (progress) => {
-                    progressBarFull.style.width = 100 * progress + "%";
-                }).then((unityInstance) => {
-                  loadingText.remove();
-                    loadingBar.style.display = "none";
-                    canvas.style.display = "block";
-                    
-                    // Initialize save system
-                    initSaveSystem(unityInstance);
-                    
-                    // Show save control overlay immediately
-                    const controls = document.getElementById('hk-save-controls');
-                    controls.style.display = 'block';
-                    
-                    // Set a backup timer to mark save system ready in case Unity FS detection fails
-                    setTimeout(() => {
-                        if (!saveReady) {
-                            console.log('Backup: Marking save system as ready after timeout');
-                            saveReady = true;
-                        }
-                    }, 5000); // 5 second fallback
-                    
-                    // Wire up save system buttons
-                    document.getElementById('hk-download').addEventListener('click', () => {
-                        console.log('Download button clicked');
-                        downloadSave();
-                    });
-                    document.getElementById('hk-upload').addEventListener('click', () => {
-                        console.log('Upload button clicked');
-                        uploadSave();
-                    });
-                    document.getElementById('hk-copy').addEventListener('click', () => {
-                        console.log('Copy button clicked');
-                        copySave();
-                    });
-                    document.getElementById('hk-paste').addEventListener('click', () => {
-                        console.log('Paste button clicked');
-                        pasteSave();
-                    });
-                    document.getElementById('hk-file-input').addEventListener('change', handleFileUpload);
-                    
-                    // Wire up new tab button
-                    document.getElementById('hk-newtab').addEventListener('click', () => {
-                        const targetUrl = 'https://j6520445-png.github.io/somehting-/index.html';
-                        const w = window.open('about:blank', '_blank');
-                        if (!w) { alert('Popup blocked by the browser. Allow popups for this site.'); return; }
-                        // Keep the top-level URL as about:blank and embed the game as a fullscreen iframe
-                        try {
-                            w.document.open();
-                            w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Hollow Knight</title>
-                              <style>html,body,iframe{margin:0;padding:0;border:0;width:100%;height:100%;background:#000}</style>
-                            </head><body>
-                              <iframe src="${targetUrl}" allow="autoplay; fullscreen; gamepad *" referrerpolicy="no-referrer-when-downgrade"></iframe>
-                            </body></html>`);
-                            w.document.close();
-                        } catch (e) {
-                            // If writing fails, fall back to navigating (URL will not remain about:blank)
-                            try { w.location.href = targetUrl; } catch {}
-                        }
-                    });
-                }).catch((message) => {
-                    alert(message);
-                });
-            };
-            document.body.appendChild(script);
-        })();
-    </script>
+      loadingBar.style.display = "block";
+      const script = document.createElement("script");
+      script.src = loaderUrl;
+      script.onload = () => {
+              createUnityInstance(canvas, config, (progress) => {
+        progressBarFull.style.width = 100 * progress + "%";
+      }).then((unityInstance) => {
+        loadingBar.style.display = "none";
+        fullscreenButton.onclick = () => {
+          unityInstance.SetFullscreen(1);
+        };
+      }).catch((message) => {
+        alert(message);
+      });
+      };
+      document.body.appendChild(script);
+    })();
+  </script>
 </body>
 
 </html>

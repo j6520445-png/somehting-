@@ -52,7 +52,6 @@
                 cursor: pointer;
             }
             #hk-save-controls button:hover { filter: brightness(1.1); }
-            #hk-status { display:inline-block; margin-left:6px; font-size:11px; color:#cfd8ff; }
     </style>
 </head>
 
@@ -63,8 +62,7 @@
             <button id="hk-export">Download Save</button>
             <button id="hk-import">Import Save</button>
             <button id="hk-newtab">Open in New Tab</button>
-            <button id="hk-sync">Force Sync</button>
-            <span id="hk-status">Storage: initializing…</span>
+            
             <input id="hk-file" type="file" accept="application/json,.json" style="display:none" />
         </div>
     <div hidden id="unity-container" class="unity-desktop">
@@ -120,37 +118,6 @@
             try { window.dispatchEvent(new Event('hk-fs-ready')); } catch {}
         }
 
-        // Human-friendly relative time for last sync display
-        function hkRelTime(ts) {
-            try {
-                const now = Date.now();
-                const d = Math.max(0, now - ts);
-                if (d < 5_000) return 'just now';
-                const s = Math.floor(d / 1000);
-                if (s < 60) return s + 's ago';
-                const m = Math.floor(s / 60);
-                if (m < 60) return m + 'm ago';
-                const h = Math.floor(m / 60);
-                if (h < 24) return h + 'h ago';
-                const days = Math.floor(h / 24);
-                return days + 'd ago';
-            } catch { return ''; }
-        }
-
-        function hkUpdateStatus() {
-            try {
-                const el = document.getElementById('hk-status');
-                if (!el) return;
-                if (!window.__hkFSReady || !window.__hkModule) { el.textContent = 'Storage: initializing…'; return; }
-                const FS = window.__hkModule.FS;
-                let fileCount = 0;
-                try { fileCount = hkListFilesRecursive(FS, '/idbfs').length; } catch {}
-                const last = window.__hkLastSync;
-                const lastText = last ? (', last sync ' + hkRelTime(last)) : '';
-                el.textContent = `Storage: ready, ${fileCount} file${fileCount === 1 ? '' : 's'}${lastText}`;
-            } catch { /* ignore */ }
-        }
-
         // Simple helper to wire robust IDBFS syncing for Unity WebGL builds
         async function setupPersistentSaves(unityInstance) {
             let Module, FS;
@@ -174,24 +141,19 @@
             // Mark FS ready for UI controls
             try { window.__hkModule = Module; } catch {}
             signalFSReady();
-            // Create a tiny marker file to verify IDBFS writes
+            // Create a tiny marker file to verify IDBFS writes (optional)
             try { FS.writeFile('/idbfs/.hk_ready', new Uint8Array([1,2,3])); } catch {}
-            // Show initial status and update it periodically
-            try {
-                hkUpdateStatus();
-                if (!window.__hkStatusTimer) window.__hkStatusTimer = setInterval(hkUpdateStatus, 10000);
-            } catch {}
 
             // Periodic background sync to persist progress while playing
             let saveInterval = setInterval(() => {
-                try { FS.syncfs(false, () => { try { window.__hkLastSync = Date.now(); hkUpdateStatus(); } catch {} }); } catch { /* ignore */ }
+                try { FS.syncfs(false, () => {}); } catch { /* ignore */ }
             }, 15000); // every 15s
 
             // Sync on lifecycle events (minimize data loss on tab close or nav away)
             const doSync = (done) => {
                 try {
                     FS.syncfs(false, () => {
-                        try { window.__hkLastSync = Date.now(); hkUpdateStatus(); } catch {}
+                        
                         done && done();
                     });
                 } catch { done && done(); }
@@ -298,30 +260,15 @@
                         payload.files.push({ path, b64: hkUint8ToBase64(data) });
                     } catch { /* skip unreadable files */ }
                 }
-                                const json = JSON.stringify(payload);
-                                const b64 = btoa(json);
-                                const ts = new Date().toISOString().replace(/[:.]/g, '-');
-
-                                // Open about:blank and construct the download entirely within that page
-                                const helper = window.open('about:blank', '_blank');
-                                if (helper) {
-                                        try {
-                                                helper.document.open();
-                                                helper.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Downloading…</title></head>
-                                                    <body onload="var a=document.createElement('a'); a.href='data:application/json;base64,${b64}'; a.download='hk-save-${ts}.json'; document.body.appendChild(a); a.click();" style="background:#111;color:#fff;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;">
-                                                        <a style="color:#8ab4f8;" href="data:application/json;base64,${b64}" download="hk-save-${ts}.json">If your download didn't start, click here.</a>
-                                                    </body></html>`);
-                                                helper.document.close();
-                                        } catch (e) {
-                                                // Fallback: navigate to data URL (user can Save Page As)
-                                                try { helper.location.href = `data:application/json;base64,${b64}`; } catch {}
-                                        }
-                                } else {
-                                        // Popup blocked: inline fallback
-                                        const a = document.createElement('a');
-                                        a.href = `data:application/json;base64,${b64}`; a.download = `hk-save-${ts}.json`;
-                                        document.body.appendChild(a); a.click(); setTimeout(() => a.remove(), 0);
-                                }
+                const json = JSON.stringify(payload);
+                // Use helper page for more reliable downloads across iframes/policies
+                const encoded = encodeURIComponent(json);
+                const helperUrl = new URL('download.html', location.href).toString() + '#' + encoded;
+                const w = window.open(helperUrl, '_blank');
+                if (!w) {
+                    // Popup blocked: fall back to navigating current tab
+                    location.href = helperUrl;
+                }
             } catch (e) {
                 alert('Export failed: ' + (e && e.message ? e.message : e));
             }
@@ -469,12 +416,10 @@
                     const btnExport = document.getElementById('hk-export');
                     const btnImport = document.getElementById('hk-import');
                     const btnNewTab = document.getElementById('hk-newtab');
-                    const btnSync = document.getElementById('hk-sync');
                     const fileInput = document.getElementById('hk-file');
                     controls.style.display = 'block';
                     btnExport.addEventListener('click', () => hkExportSave());
                     btnImport.addEventListener('click', () => fileInput.click());
-                    btnSync.addEventListener('click', async () => { try { await waitForFSReady(5000); if (window.__hkModule) { window.__hkModule.FS.syncfs(false, () => { try { window.__hkLastSync = Date.now(); hkUpdateStatus(); } catch {} }); } } catch {} });
                     fileInput.addEventListener('change', (e) => {
                         const f = e.target.files && e.target.files[0];
                         if (f) hkImportSave(f);

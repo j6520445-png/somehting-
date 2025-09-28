@@ -1,0 +1,44 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Download Save</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' data: blob:; connect-src 'self' data: blob:; img-src 'self' data:; style-src 'self' 'unsafe-inline'; child-src 'self' data: blob:;">
+  <style>
+    html,body{height:100%;margin:0;background:#111;color:#fff;font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;display:flex;align-items:center;justify-content:center}
+    a.button{padding:10px 14px;background:#2d6cdf;border:1px solid #1f4aa3;border-radius:8px;color:#fff;text-decoration:none}
+  </style>
+</head>
+<body>
+  <div id="content">Preparing download…</div>
+  <script>
+    (function(){
+      try{
+        var hash = location.hash || '';
+        if(hash.startsWith('#')) hash = hash.slice(1);
+        var json = decodeURIComponent(hash);
+        if(!json){ document.getElementById('content').textContent = 'No data provided.'; return; }
+        // Validate it's a JSON string by peeking first char
+        if(json[0] !== '{' && json[0] !== '[') json = atob(json);
+        var blob = new Blob([json], {type:'application/json'});
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        var ts = new Date().toISOString().replace(/[:.]/g,'-');
+        a.href = url;
+        a.download = 'hk-save-' + ts + '.json';
+        // Auto click
+        document.body.appendChild(a);
+        a.click();
+        // Fallback clickable link
+        var link = document.createElement('a');
+        link.href = url; link.download = a.download; link.className='button'; link.textContent='Click to download save';
+        var c = document.getElementById('content'); c.innerHTML=''; c.appendChild(link);
+        // Cleanup later
+        setTimeout(function(){ URL.revokeObjectURL(url); }, 60000);
+      }catch(e){
+        document.getElementById('content').textContent = 'Download failed: ' + (e && e.message ? e.message : e);
+      }
+    })();
+  </script>
+</body>
+</html>

@@ -77,9 +77,24 @@
       }
       return btoa(result);
     }
+    // Helper: base64 -> Uint8Array
+    function hkBase64ToUint8(b64) {
+      const str = atob(b64); const u8 = new Uint8Array(str.length);
+      for (let i = 0; i < str.length; i++) u8[i] = str.charCodeAt(i);
+      return u8;
+    }
+    // Ensure directory path exists in Emscripten FS
+    function hkEnsureDirs(FS, fullPath) {
+      const parts = fullPath.split('/');
+      let current = '';
+      for (let i = 1; i < parts.length - 1; i++) {
+        current += '/' + parts[i];
+        try { if (!FS.analyzePath(current).exists) FS.mkdir(current); } catch { try { FS.mkdir(current); } catch {} }
+      }
+    }
 
     // Simple localStorage save system for school environments
-    function setupLocalStorageSaves(unityInstance) {
+  async function setupLocalStorageSaves(unityInstance) {
       const SAVE_KEY = 'hollow_knight_save_data';
       let saveInterval;
       
@@ -87,8 +102,30 @@
         // Try to restore previous save when game starts
         const savedData = localStorage.getItem(SAVE_KEY);
         if (savedData) {
-          console.log('Found previous save data, will attempt to restore');
-          // Unity games often save to specific paths, we'll monitor those
+          console.log('Found previous save data, attempting restore');
+          try {
+            const Module = unityInstance.Module;
+            const FS = Module && Module.FS;
+            const data = JSON.parse(savedData);
+            if (Module && FS && data) {
+              // Mount IDBFS if available so writes persist
+              if (Module.IDBFS) {
+                try { if (!FS.analyzePath('/idbfs').exists) { FS.mkdir('/idbfs'); FS.mount(Module.IDBFS, {}, '/idbfs'); } } catch {}
+                await new Promise(r => { try { FS.syncfs(true, () => r()); } catch { r(); } });
+              }
+              // Write back any file entries saved as absolute paths
+              for (const [key, val] of Object.entries(data)) {
+                if (typeof key === 'string' && key.startsWith('/') && typeof val === 'string') {
+                  try {
+                    hkEnsureDirs(FS, key);
+                    FS.writeFile(key, hkBase64ToUint8(val));
+                  } catch {}
+                }
+              }
+              try { await new Promise(r => { try { FS.syncfs(false, () => r()); } catch { r(); } }); } catch {}
+              console.log('Restore complete');
+            }
+          } catch (e) { console.log('Restore failed:', e); }
         }
         
         // Auto-save every 15 seconds (good balance for school computers)

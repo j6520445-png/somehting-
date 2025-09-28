@@ -1,0 +1,13 @@
+{
+  "name": "Hollow Knight (Web)",
+  "short_name": "HK Web",
+  "start_url": "/somehting-/index.html",
+  "scope": "/somehting-/",
+  "display": "standalone",
+  "background_color": "#231F20",
+  "theme_color": "#231F20",
+  "icons": [
+    { "src": "TemplateData/favicon.ico", "sizes": "64x64 32x32 16x16", "type": "image/x-icon" },
+    { "src": "TemplateData/unity-logo-dark.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+  ]
+}

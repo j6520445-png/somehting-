@@ -7,6 +7,7 @@
   <title>Unity WebGL Player | Hollow Knight (Web)</title>
   <link rel="shortcut icon" href="TemplateData/favicon.ico">
   <link rel="stylesheet" href="TemplateData/style.css">
+  <link rel="manifest" href="manifest.webmanifest">
   <style>
     html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #231F20; }
     #unity-container { width: 100%; height: 100%; position: fixed; top: 0; left: 0; }
@@ -25,6 +26,12 @@
         <div id="unity-mobile-warning"> WebGL builds are not supported on mobile devices. </div>
     </div>
   <script>
+    // Register service worker for offline/PWA install
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('sw.js').catch(() => {});
+      });
+    }
     const loadingText = document.querySelector("#loading-text");
     let totalBytes = 0, loadedBytes = 0;
     let mbTotalLabel = '...';

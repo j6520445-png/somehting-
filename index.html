@@ -224,15 +224,31 @@
                 const json = JSON.stringify(payload);
                 const blob = new Blob([json], { type: 'application/json' });
                 const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
                 const ts = new Date().toISOString().replace(/[:.]/g, '-');
-                a.download = `hk-save-${ts}.json`;
-                document.body.appendChild(a);
-                a.click();
-                // Fallback: open in a new tab in case downloads are blocked in iframes
-                try { window.open(url, '_blank'); } catch {}
-                setTimeout(() => { URL.revokeObjectURL(url); document.body.removeChild(a); }, 5000);
+
+                // Prefer downloading from an about:blank helper tab to bypass iframe restrictions
+                const helper = window.open('about:blank', '_blank');
+                if (helper) {
+                    try {
+                        helper.document.open();
+                                                helper.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Downloading…</title></head>
+                                                    <body onload="setTimeout(function(){try{document.getElementById('dl').click()}catch(e){}},50)" style="background:#111;color:#fff;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;">
+                                                        <a id="dl" style="color:#8ab4f8;" href="${url}" download="hk-save-${ts}.json">If your download didn't start, click here.</a>
+                                                    </body></html>`);
+                        helper.document.close();
+                    } catch (e) {
+                        // If writing is blocked, navigate the helper to the blob URL (URL bar may change to blob:)
+                        try { helper.location.href = url; } catch {}
+                    }
+                } else {
+                    // Popup blocked: try inline download as a fallback
+                    const a = document.createElement('a');
+                    a.href = url; a.download = `hk-save-${ts}.json`;
+                    document.body.appendChild(a); a.click();
+                    setTimeout(() => { document.body.removeChild(a); }, 0);
+                }
+                // Revoke after a few seconds to allow download to start
+                setTimeout(() => { URL.revokeObjectURL(url); }, 10000);
             } catch (e) {
                 alert('Export failed: ' + (e && e.message ? e.message : e));
             }
@@ -392,10 +408,17 @@
                         const targetUrl = 'https://j6520445-png.github.io/somehting-/index.html';
                         const w = window.open('about:blank', '_blank');
                         if (!w) { alert('Popup blocked by the browser. Allow popups for this site.'); return; }
+                        // Keep the top-level URL as about:blank and embed the game as a fullscreen iframe
                         try {
-                            w.document.write(`<!doctype html><html><head><title>Loading…</title><meta http-equiv="refresh" content="0;url=${targetUrl}"></head><body style="background:#111;color:#fff;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;">Opening game…</body></html>`);
+                            w.document.open();
+                            w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Hollow Knight</title>
+                              <style>html,body,iframe{margin:0;padding:0;border:0;width:100%;height:100%;background:#000}</style>
+                            </head><body>
+                              <iframe src="${targetUrl}" allow="autoplay; fullscreen; gamepad *" referrerpolicy="no-referrer-when-downgrade"></iframe>
+                            </body></html>`);
                             w.document.close();
-                        } catch {
+                        } catch (e) {
+                            // If writing fails, fall back to navigating (URL will not remain about:blank)
                             try { w.location.href = targetUrl; } catch {}
                         }
                     });

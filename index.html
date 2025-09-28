@@ -52,6 +52,7 @@
                 cursor: pointer;
             }
             #hk-save-controls button:hover { filter: brightness(1.1); }
+            #hk-status { display:inline-block; margin-left:6px; font-size:11px; color:#cfd8ff; }
     </style>
 </head>
 
@@ -62,6 +63,8 @@
             <button id="hk-export">Download Save</button>
             <button id="hk-import">Import Save</button>
             <button id="hk-newtab">Open in New Tab</button>
+            <button id="hk-sync">Force Sync</button>
+            <span id="hk-status">Storage: initializing…</span>
             <input id="hk-file" type="file" accept="application/json,.json" style="display:none" />
         </div>
     <div hidden id="unity-container" class="unity-desktop">
@@ -117,6 +120,37 @@
             try { window.dispatchEvent(new Event('hk-fs-ready')); } catch {}
         }
 
+        // Human-friendly relative time for last sync display
+        function hkRelTime(ts) {
+            try {
+                const now = Date.now();
+                const d = Math.max(0, now - ts);
+                if (d < 5_000) return 'just now';
+                const s = Math.floor(d / 1000);
+                if (s < 60) return s + 's ago';
+                const m = Math.floor(s / 60);
+                if (m < 60) return m + 'm ago';
+                const h = Math.floor(m / 60);
+                if (h < 24) return h + 'h ago';
+                const days = Math.floor(h / 24);
+                return days + 'd ago';
+            } catch { return ''; }
+        }
+
+        function hkUpdateStatus() {
+            try {
+                const el = document.getElementById('hk-status');
+                if (!el) return;
+                if (!window.__hkFSReady || !window.__hkModule) { el.textContent = 'Storage: initializing…'; return; }
+                const FS = window.__hkModule.FS;
+                let fileCount = 0;
+                try { fileCount = hkListFilesRecursive(FS, '/idbfs').length; } catch {}
+                const last = window.__hkLastSync;
+                const lastText = last ? (', last sync ' + hkRelTime(last)) : '';
+                el.textContent = `Storage: ready, ${fileCount} file${fileCount === 1 ? '' : 's'}${lastText}`;
+            } catch { /* ignore */ }
+        }
+
         // Simple helper to wire robust IDBFS syncing for Unity WebGL builds
         async function setupPersistentSaves(unityInstance) {
             let Module, FS;
@@ -140,15 +174,27 @@
             // Mark FS ready for UI controls
             try { window.__hkModule = Module; } catch {}
             signalFSReady();
+            // Create a tiny marker file to verify IDBFS writes
+            try { FS.writeFile('/idbfs/.hk_ready', new Uint8Array([1,2,3])); } catch {}
+            // Show initial status and update it periodically
+            try {
+                hkUpdateStatus();
+                if (!window.__hkStatusTimer) window.__hkStatusTimer = setInterval(hkUpdateStatus, 10000);
+            } catch {}
 
             // Periodic background sync to persist progress while playing
             let saveInterval = setInterval(() => {
-                try { FS.syncfs(false, () => {}); } catch { /* ignore */ }
+                try { FS.syncfs(false, () => { try { window.__hkLastSync = Date.now(); hkUpdateStatus(); } catch {} }); } catch { /* ignore */ }
             }, 15000); // every 15s
 
             // Sync on lifecycle events (minimize data loss on tab close or nav away)
             const doSync = (done) => {
-                try { FS.syncfs(false, () => done && done()); } catch { done && done(); }
+                try {
+                    FS.syncfs(false, () => {
+                        try { window.__hkLastSync = Date.now(); hkUpdateStatus(); } catch {}
+                        done && done();
+                    });
+                } catch { done && done(); }
             };
 
             const visibilityHandler = () => { if (document.hidden) doSync(); };
@@ -238,7 +284,7 @@
         if (!window.__hkModule || !window.__hkFSReady) { alert('Save system not ready yet. Try again in a moment.'); return; }
                 const Module = window.__hkModule; const FS = Module.FS;
                 // Flush recent changes before exporting
-                await new Promise(r => { try { FS.syncfs(false, () => r()); } catch { r(); } });
+        await new Promise(r => { try { FS.syncfs(false, () => { try { window.__hkLastSync = Date.now(); hkUpdateStatus(); } catch {} r(); }); } catch { r(); } });
                 const root = '/idbfs';
                 const files = hkListFilesRecursive(FS, root);
                 const payload = { version: 1, createdAt: new Date().toISOString(), files: [] };
@@ -299,7 +345,7 @@
                     } catch { /* continue */ }
                 }
                 // Persist to IndexedDB
-                await new Promise(r => { try { FS.syncfs(false, () => r()); } catch { r(); } });
+                await new Promise(r => { try { FS.syncfs(false, () => { try { window.__hkLastSync = Date.now(); hkUpdateStatus(); } catch {} r(); }); } catch { r(); } });
                 alert('Save imported. If the game is running, return to main menu or reload the page to ensure it picks up the new save.');
             } catch (e) {
                 alert('Import failed: ' + (e && e.message ? e.message : e));
@@ -423,10 +469,12 @@
                     const btnExport = document.getElementById('hk-export');
                     const btnImport = document.getElementById('hk-import');
                     const btnNewTab = document.getElementById('hk-newtab');
+                    const btnSync = document.getElementById('hk-sync');
                     const fileInput = document.getElementById('hk-file');
                     controls.style.display = 'block';
                     btnExport.addEventListener('click', () => hkExportSave());
                     btnImport.addEventListener('click', () => fileInput.click());
+                    btnSync.addEventListener('click', async () => { try { await waitForFSReady(5000); if (window.__hkModule) { window.__hkModule.FS.syncfs(false, () => { try { window.__hkLastSync = Date.now(); hkUpdateStatus(); } catch {} }); } } catch {} });
                     fileInput.addEventListener('change', (e) => {
                         const f = e.target.files && e.target.files[0];
                         if (f) hkImportSave(f);

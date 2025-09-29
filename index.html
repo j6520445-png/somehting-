@@ -10,13 +10,14 @@
   <link rel="manifest" href="manifest.webmanifest">
   <style>
     html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #231F20; }
-    #unity-container { width: 100%; height: 100%; position: fixed; top: 0; left: 0; }
+  #unity-container { width: 100%; height: 100%; position: fixed; top: 0; left: 0; }
+  #unity-canvas { position: relative; z-index: 1; }
     /* Simple overlay for Save/Load controls */
     #save-load-bar {
       position: fixed;
       top: 10px;
       left: 10px;
-      z-index: 10000;
+      z-index: 9999;
       display: flex;
       gap: 8px;
       align-items: center;
@@ -44,9 +45,9 @@
 <body>
   <!-- Save/Load controls overlay (non-invasive) -->
   <div id="save-load-bar" title="Export/import a save file. Press H to hide/show this bar.">
-    <button id="btn-save" aria-label="Save to file">Save</button>
-    <button id="btn-load" class="load" aria-label="Load from file">Load</button>
-    <span class="note">Saves to save.json</span>
+    <button id="btn-save" aria-label="Download save to file">Download Save</button>
+    <button id="btn-load" class="load" aria-label="Upload save from file">Upload Save</button>
+    <span class="note">Uses save.json</span>
   </div>
   <div id="loading-text" style="color:#fff; font-size:48px; font-family:cursive; text-align:center; margin-top:20px;"> LOADING... </div>
     <div hidden id="unity-container" class="unity-desktop">

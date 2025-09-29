@@ -45,9 +45,18 @@
 <body>
   <!-- Save/Load controls overlay (non-invasive) -->
   <div id="save-load-bar" title="Export/import a save file. Press H to hide/show this bar.">
-    <button id="btn-save" aria-label="Export backup to file">Export Save</button>
-    <button id="btn-load" class="load" aria-label="Import backup from file">Import Save</button>
-    <span class="note">Backs up actual save data</span>
+    <button id="btn-save" aria-label="Trigger in-game save and download JSON">Save JSON</button>
+    <button id="btn-load" class="load" aria-label="Load JSON into the game">Load JSON</button>
+    <span class="note">Simple JSON Save/Load via Unity</span>
+    <details style="margin-left:8px;">
+      <summary style="cursor:pointer;">Settings</summary>
+      <div style="display:flex; gap:6px; align-items:center; margin-top:6px;">
+        <label>Object <input id="ub-obj" style="width:120px;" value="GameManager" /></label>
+        <label>Save <input id="ub-save" style="width:120px;" value="SaveGame" /></label>
+        <label>Load <input id="ub-load" style="width:160px;" value="LoadGameFromJSON" /></label>
+        <button id="ub-apply" style="background:#555;">Apply</button>
+      </div>
+    </details>
   </div>
   <div id="loading-text" style="color:#fff; font-size:48px; font-family:cursive; text-align:center; margin-top:20px;"> LOADING... </div>
   <div hidden id="unity-container" class="unity-desktop">
@@ -70,6 +79,16 @@
     }
 
   const loadingText = document.querySelector('#loading-text');
+  // Unity bridge defaults — update if your GameObject or method names differ; persisted in localStorage
+  const unityBridge = { gameObject: 'GameManager', saveMethod: 'SaveGame', loadMethod: 'LoadGameFromJSON' };
+  try {
+    const savedBridge = JSON.parse(localStorage.getItem('hk_unity_bridge') || 'null');
+    if (savedBridge && savedBridge.gameObject && savedBridge.saveMethod && savedBridge.loadMethod) {
+      unityBridge.gameObject = savedBridge.gameObject;
+      unityBridge.saveMethod = savedBridge.saveMethod;
+      unityBridge.loadMethod = savedBridge.loadMethod;
+    }
+  } catch {}
   const SAVE_KEY = 'hollow_knight_save_data';
     let totalBytes = 0, loadedBytes = 0;
     let mbTotalLabel = '...';
@@ -302,15 +321,13 @@
           loadingBar.style.display = 'none';
           // Optional fullscreen via 'F' key
           window.addEventListener('keydown', (e) => { if ((e.key || '').toLowerCase() === 'f') unityInstance.SetFullscreen(1); });
-          // Setup localStorage save system
-          setupLocalStorageSaves(unityInstance);
+          // Note: autosave/backup disabled per user request
         }).catch((message) => { alert(message); });
       };
       document.body.appendChild(script);
     })();
 
-    // Start universal autosave immediately (before Unity fully loads)
-    startUniversalAutosave();
+    // Autosave/backup disabled
 
     // --- Lightweight Save/Load helpers matching the requested behavior ---
     function downloadFile(filename, text) {
@@ -346,58 +363,32 @@
       input.click();
     }
 
-    // Example SaveData (mirrors the C# shape in instructions)
-    function buildSampleSaveData() {
-      return { playerLevel: 5, playerHealth: 87.5, coins: 250 };
+    // Simple JSON Save/Load via Unity SendMessage
+    function saveJsonViaUnity() {
+      if (!window.unityInstance || typeof window.unityInstance.SendMessage !== 'function') {
+        alert('Game is not ready yet. Please wait for it to finish loading.');
+        return;
+      }
+      try {
+        window.unityInstance.SendMessage(unityBridge.gameObject, unityBridge.saveMethod, '');
+      } catch (e) {
+        console.error(e);
+        alert(`Could not call ${unityBridge.gameObject}.${unityBridge.saveMethod}. Make sure the method exists in the build.`);
+      }
     }
 
-    // Export actual save backup (FS snapshot) and try to trigger in-game save before capture
-    function exportSaveBackup() {
-      // Try to ask Unity to write its save first, if such a method exists
-      try { if (window.unityInstance && typeof window.unityInstance.SendMessage === 'function') {
-        window.unityInstance.SendMessage('GameManager', 'SaveGame');
-      }} catch {}
-      // Delay briefly to allow save to flush, then capture FS and download
-      setTimeout(() => {
-        hkPerformBackup(window.unityInstance || null);
-        const payload = localStorage.getItem(SAVE_KEY) || '{}';
-        const ts = new Date();
-        const stamp = ts.toISOString().replace(/[:.]/g,'-');
-        downloadFile(`hk-save-backup-${stamp}.json`, payload);
-      }, 1500);
-    }
-
-    // Import a backup JSON and restore files to FS; offer to reload the page
-    function importSaveBackupFromUser() {
-      uploadFile(async (json) => {
-        let data;
-        try { data = JSON.parse(json); }
-        catch { alert('Selected file is not valid JSON.'); return; }
-        // Persist backup to localStorage regardless
-        localStorage.setItem(SAVE_KEY, JSON.stringify(data));
-        // Try to restore into Unity FS now if available
+    function loadJsonIntoUnity() {
+      uploadFile((json) => {
+        if (!window.unityInstance || typeof window.unityInstance.SendMessage !== 'function') {
+          alert('Game is not ready yet. Please wait for it to finish loading.');
+          return;
+        }
         try {
-          const unity = window.unityInstance;
-          const Module = unity && unity.Module;
-          const FS = Module && Module.FS;
-          if (Module && FS) {
-            if (Module.IDBFS) {
-              try { if (!FS.analyzePath('/idbfs').exists) { FS.mkdir('/idbfs'); FS.mount(Module.IDBFS, {}, '/idbfs'); } } catch {}
-              await new Promise(r => { try { FS.syncfs(true, () => r()); } catch { r(); } });
-            }
-            for (const [key, val] of Object.entries(data)) {
-              if (typeof key === 'string' && key.startsWith('/') && typeof val === 'string') {
-                try { hkEnsureDirs(FS, key); FS.writeFile(key, hkBase64ToUint8(val)); } catch {}
-              }
-            }
-            try { await new Promise(r => { try { FS.syncfs(false, () => r()); } catch { r(); } }); } catch {}
-            const doReload = confirm('Save data imported. Reload the page now to ensure the game loads the new save?');
-            if (doReload) location.reload();
-          } else {
-            alert('Save data stored. It will be applied automatically when the game FS is available.');
-          }
+          window.unityInstance.SendMessage(unityBridge.gameObject, unityBridge.loadMethod, json);
+          alert('Save data sent to the game. If nothing changes, verify the GameObject and method names.');
         } catch (e) {
-          alert('Imported backup saved. It will be applied on next run.');
+          console.error(e);
+          alert(`Could not call ${unityBridge.gameObject}.${unityBridge.loadMethod}(json). Make sure the method exists in the build.`);
         }
       });
     }
@@ -405,9 +396,26 @@
     // Wire up UI and toggle
     const btnSave = document.getElementById('btn-save');
     const btnLoad = document.getElementById('btn-load');
-  btnSave && btnSave.addEventListener('click', exportSaveBackup);
-  btnLoad && btnLoad.addEventListener('click', importSaveBackupFromUser);
+  btnSave && btnSave.addEventListener('click', saveJsonViaUnity);
+  btnLoad && btnLoad.addEventListener('click', loadJsonIntoUnity);
     const bar = document.getElementById('save-load-bar');
+    // Bridge settings UI
+    const ubObj = document.getElementById('ub-obj');
+    const ubSave = document.getElementById('ub-save');
+    const ubLoad = document.getElementById('ub-load');
+    const ubApply = document.getElementById('ub-apply');
+    if (ubObj && ubSave && ubLoad) {
+      ubObj.value = unityBridge.gameObject;
+      ubSave.value = unityBridge.saveMethod;
+      ubLoad.value = unityBridge.loadMethod;
+    }
+    ubApply && ubApply.addEventListener('click', () => {
+      unityBridge.gameObject = ubObj.value.trim() || unityBridge.gameObject;
+      unityBridge.saveMethod = ubSave.value.trim() || unityBridge.saveMethod;
+      unityBridge.loadMethod = ubLoad.value.trim() || unityBridge.loadMethod;
+      try { localStorage.setItem('hk_unity_bridge', JSON.stringify(unityBridge)); } catch {}
+      alert('Updated. Try Save/Load again.');
+    });
     window.addEventListener('keydown', (e) => {
       if (e.key === 'h' || e.key === 'H') {
         bar.style.display = (bar.style.display === 'none') ? 'flex' : 'none';

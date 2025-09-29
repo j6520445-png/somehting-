@@ -1,4 +1,4 @@
-const CACHE_NAME = 'hk-web-cache-v1';
+const CACHE_NAME = 'hk-web-cache-v2';
 const ASSETS = [
   './',
   './index.html',
@@ -24,16 +24,36 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
-  if (url.origin === location.origin) {
+  if (url.origin !== location.origin) return; // only handle same-origin
+
+  // Network-first strategy for navigations and index.html to avoid stale UI
+  const isNavigation = event.request.mode === 'navigate';
+  const isIndex = url.pathname.endsWith('/') || url.pathname.endsWith('/index.html') || url.pathname === '/index.html';
+
+  if (isNavigation || isIndex) {
     event.respondWith(
-      caches.match(event.request).then((cached) => {
-        const fetchPromise = fetch(event.request).then((response) => {
+      fetch(event.request)
+        .then((response) => {
           const copy = response.clone();
           caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
           return response;
-        }).catch(() => cached);
-        return cached || fetchPromise;
-      })
+        })
+        .catch(() => caches.match(event.request))
     );
+    return;
   }
+
+  // For other requests: cache-first with background update
+  event.respondWith(
+    caches.match(event.request).then((cached) => {
+      const fetchPromise = fetch(event.request)
+        .then((response) => {
+          const copy = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+          return response;
+        })
+        .catch(() => cached);
+      return cached || fetchPromise;
+    })
+  );
 });

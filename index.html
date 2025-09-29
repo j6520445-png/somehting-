@@ -45,9 +45,9 @@
 <body>
   <!-- Save/Load controls overlay (non-invasive) -->
   <div id="save-load-bar" title="Export/import a save file. Press H to hide/show this bar.">
-    <button id="btn-save" aria-label="Download save to file">Download Save</button>
-    <button id="btn-load" class="load" aria-label="Upload save from file">Upload Save</button>
-    <span class="note">Uses save.json</span>
+    <button id="btn-save" aria-label="Export backup to file">Export Save</button>
+    <button id="btn-load" class="load" aria-label="Import backup from file">Import Save</button>
+    <span class="note">Backs up actual save data</span>
   </div>
   <div id="loading-text" style="color:#fff; font-size:48px; font-family:cursive; text-align:center; margin-top:20px;"> LOADING... </div>
   <div hidden id="unity-container" class="unity-desktop">
@@ -69,7 +69,8 @@
       });
     }
 
-    const loadingText = document.querySelector('#loading-text');
+  const loadingText = document.querySelector('#loading-text');
+  const SAVE_KEY = 'hollow_knight_save_data';
     let totalBytes = 0, loadedBytes = 0;
     let mbTotalLabel = '...';
     const MB = 1024 * 1024;
@@ -137,10 +138,54 @@
       }
     }
 
-    // Simple localStorage save system for school environments
+    // Single backup tick: captures FS (if available) into localStorage
+    function hkPerformBackup(unityInstance) {
+      try {
+        const Module = unityInstance && unityInstance.Module;
+        if (Module && Module.FS) {
+          const savePaths = [ '/idbfs', '/persistent', '/saves', '/userdata' ];
+          const saveData = { timestamp: Date.now(), version: '1.0' };
+          for (const path of savePaths) {
+            try {
+              if (Module.FS.analyzePath(path).exists) {
+                const files = Module.FS.readdir(path);
+                saveData[path] = files.filter(f => f !== '.' && f !== '..');
+                for (const file of saveData[path]) {
+                  try {
+                    const fullPath = path + '/' + file;
+                    const stats = Module.FS.stat(fullPath);
+                    if (!Module.FS.isDir(stats.mode)) {
+                      const bytes = Module.FS.readFile(fullPath);
+                      saveData[fullPath] = hkUint8ToBase64(bytes);
+                    }
+                  } catch {}
+                }
+              }
+            } catch {}
+          }
+          localStorage.setItem(SAVE_KEY, JSON.stringify(saveData));
+        } else {
+          // Fallback heartbeat so we at least track sessions
+          const prev = JSON.parse(localStorage.getItem(SAVE_KEY) || '{}');
+          const stub = { timestamp: Date.now(), sessions: (prev.sessions || 0) + 1, fallback_mode: true };
+          localStorage.setItem(SAVE_KEY, JSON.stringify(stub));
+        }
+      } catch (e) { console.log('Backup tick failed:', e); }
+    }
+
+    // Universal autosave loop: starts immediately and runs regardless of init order
+    function startUniversalAutosave() {
+      if (window.__hkBackupInterval) return; // guard against duplicates
+      window.__hkBackupInterval = setInterval(() => {
+        hkPerformBackup(window.unityInstance || null);
+      }, 15000);
+      // Also perform an initial quick backup shortly after page load
+      setTimeout(() => hkPerformBackup(window.unityInstance || null), 3000);
+    }
+
+    // Restore-on-start and mount IDBFS when Unity is ready
     async function setupLocalStorageSaves(unityInstance) {
-      const SAVE_KEY = 'hollow_knight_save_data';
-      let saveInterval;
+      let saveInterval; // deprecated by universal loop, kept for compatibility
       try {
         // Try to restore previous save when game starts
         const savedData = localStorage.getItem(SAVE_KEY);
@@ -171,39 +216,10 @@
           } catch (e) { console.log('Restore failed:', e); }
         }
 
-        // Auto-save every 15 seconds
-        saveInterval = setInterval(() => {
-          try {
-            const Module = unityInstance.Module;
-            if (Module && Module.FS) {
-              const savePaths = [ '/idbfs', '/persistent', '/saves', '/userdata' ];
-              const saveData = { timestamp: Date.now(), version: '1.0' };
-              for (const path of savePaths) {
-                try {
-                  if (Module.FS.analyzePath(path).exists) {
-                    const files = Module.FS.readdir(path);
-                    saveData[path] = files.filter(f => f !== '.' && f !== '..');
-                    for (const file of saveData[path]) {
-                      try {
-                        const fullPath = path + '/' + file;
-                        const stats = Module.FS.stat(fullPath);
-                        if (!Module.FS.isDir(stats.mode)) {
-                          const bytes = Module.FS.readFile(fullPath);
-                          saveData[fullPath] = hkUint8ToBase64(bytes);
-                        }
-                      } catch {}
-                    }
-                  }
-                } catch {}
-              }
-              localStorage.setItem(SAVE_KEY, JSON.stringify(saveData));
-            } else {
-              const prev = JSON.parse(localStorage.getItem(SAVE_KEY) || '{}');
-              const saveData = { timestamp: Date.now(), sessions: (prev.sessions || 0) + 1, fallback_mode: true };
-              localStorage.setItem(SAVE_KEY, JSON.stringify(saveData));
-            }
-          } catch (e) { console.log('Save attempt failed:', e); }
-        }, 15000);
+        // Universal loop is already running; avoid setting another interval
+        if (!window.__hkBackupInterval) {
+          window.__hkBackupInterval = setInterval(() => hkPerformBackup(unityInstance), 15000);
+        }
 
         const emergencySave = () => {
           if (saveInterval) clearInterval(saveInterval);
@@ -293,6 +309,9 @@
       document.body.appendChild(script);
     })();
 
+    // Start universal autosave immediately (before Unity fully loads)
+    startUniversalAutosave();
+
     // --- Lightweight Save/Load helpers matching the requested behavior ---
     function downloadFile(filename, text) {
       try {
@@ -332,22 +351,53 @@
       return { playerLevel: 5, playerHealth: 87.5, coins: 250 };
     }
 
-    function saveGameWeb() {
-      const data = buildSampleSaveData();
-      const json = JSON.stringify(data);
-      downloadFile('save.json', json);
+    // Export actual save backup (FS snapshot) and try to trigger in-game save before capture
+    function exportSaveBackup() {
+      // Try to ask Unity to write its save first, if such a method exists
+      try { if (window.unityInstance && typeof window.unityInstance.SendMessage === 'function') {
+        window.unityInstance.SendMessage('GameManager', 'SaveGame');
+      }} catch {}
+      // Delay briefly to allow save to flush, then capture FS and download
+      setTimeout(() => {
+        hkPerformBackup(window.unityInstance || null);
+        const payload = localStorage.getItem(SAVE_KEY) || '{}';
+        const ts = new Date();
+        const stamp = ts.toISOString().replace(/[:.]/g,'-');
+        downloadFile(`hk-save-backup-${stamp}.json`, payload);
+      }, 1500);
     }
 
-    function loadGameWeb() {
-      uploadFile((json) => {
-        try { console.log('Loaded save.json:', JSON.parse(json)); } catch { console.warn('Loaded non-JSON or malformed save; forwarding raw string.'); }
-        if (window.unityInstance && typeof window.unityInstance.SendMessage === 'function') {
-          try {
-            window.unityInstance.SendMessage('GameManager', 'LoadGameFromJSON', json);
-            console.info('Forwarded save data to Unity GameManager.LoadGameFromJSON');
-          } catch (e) { console.warn('Unity message failed. Ensure GameObject/Method exist in the build.', e); }
-        } else {
-          alert('Save loaded. If this build includes a SaveManager, it will receive the data when available.');
+    // Import a backup JSON and restore files to FS; offer to reload the page
+    function importSaveBackupFromUser() {
+      uploadFile(async (json) => {
+        let data;
+        try { data = JSON.parse(json); }
+        catch { alert('Selected file is not valid JSON.'); return; }
+        // Persist backup to localStorage regardless
+        localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+        // Try to restore into Unity FS now if available
+        try {
+          const unity = window.unityInstance;
+          const Module = unity && unity.Module;
+          const FS = Module && Module.FS;
+          if (Module && FS) {
+            if (Module.IDBFS) {
+              try { if (!FS.analyzePath('/idbfs').exists) { FS.mkdir('/idbfs'); FS.mount(Module.IDBFS, {}, '/idbfs'); } } catch {}
+              await new Promise(r => { try { FS.syncfs(true, () => r()); } catch { r(); } });
+            }
+            for (const [key, val] of Object.entries(data)) {
+              if (typeof key === 'string' && key.startsWith('/') && typeof val === 'string') {
+                try { hkEnsureDirs(FS, key); FS.writeFile(key, hkBase64ToUint8(val)); } catch {}
+              }
+            }
+            try { await new Promise(r => { try { FS.syncfs(false, () => r()); } catch { r(); } }); } catch {}
+            const doReload = confirm('Save data imported. Reload the page now to ensure the game loads the new save?');
+            if (doReload) location.reload();
+          } else {
+            alert('Save data stored. It will be applied automatically when the game FS is available.');
+          }
+        } catch (e) {
+          alert('Imported backup saved. It will be applied on next run.');
         }
       });
     }
@@ -355,8 +405,8 @@
     // Wire up UI and toggle
     const btnSave = document.getElementById('btn-save');
     const btnLoad = document.getElementById('btn-load');
-    btnSave && btnSave.addEventListener('click', saveGameWeb);
-    btnLoad && btnLoad.addEventListener('click', loadGameWeb);
+  btnSave && btnSave.addEventListener('click', exportSaveBackup);
+  btnLoad && btnLoad.addEventListener('click', importSaveBackupFromUser);
     const bar = document.getElementById('save-load-bar');
     window.addEventListener('keydown', (e) => {
       if (e.key === 'h' || e.key === 'H') {

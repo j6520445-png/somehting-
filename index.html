@@ -57,6 +57,8 @@
         <button id="ub-apply" style="background:#555;">Apply</button>
       </div>
     </details>
+    <button id="btn-save-ready" style="display:none; background:#8e24aa;">Download Ready</button>
+    <span id="save-status" class="note" style="margin-left:6px;"></span>
   </div>
   <div id="loading-text" style="color:#fff; font-size:48px; font-family:cursive; text-align:center; margin-top:20px;"> LOADING... </div>
   <div hidden id="unity-container" class="unity-desktop">
@@ -353,7 +355,8 @@
         document.body.appendChild(link);
         link.click();
         link.remove();
-        setTimeout(() => URL.revokeObjectURL(link.href), 0);
+        // Give the browser time to finish the download before revoking
+        setTimeout(() => URL.revokeObjectURL(link.href), 15000);
       } catch (e) {
         console.error('Download failed:', e);
         alert('Failed to download save file.');
@@ -379,6 +382,9 @@
 
     // Simple JSON Save/Load via Unity SendMessage
     async function saveJsonViaUnity() {
+      const statusEl = document.getElementById('save-status');
+      const saveBtn = document.getElementById('btn-save');
+      const readyBtn = document.getElementById('btn-save-ready');
       // 1) Try to nudge Unity to save (if their build supports a download)
       try { if (window.unityInstance && typeof window.unityInstance.SendMessage === 'function') {
         window.unityInstance.SendMessage(unityBridge.gameObject, unityBridge.saveMethod, '');
@@ -396,7 +402,10 @@
         } catch {}
       }
 
-      // 3) If Unity FS is available, snapshot real save files (PlayerPrefs/IDBFS) into JSON with checksum
+      // 3) If Unity FS is available, snapshot real save files (PlayerPrefs/IDBFS) into JSON with checksum.
+      // Because this requires async, prepare the payload and then ask user to click the 'Download Ready' button
+      if (statusEl) statusEl.textContent = 'Preparing save...';
+      if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Preparing...'; }
       try {
         const unity = window.unityInstance; const Module = unity && unity.Module; const FS = Module && Module.FS;
         if (Module && FS) {
@@ -426,12 +435,16 @@
           const dataObj = { fsSnapshot: { files } };
           const payload = hkPayload(dataObj);
           const ts = new Date().toISOString().replace(/[:.]/g,'-');
-          downloadFile(`HK_Save_${ts}.json`, JSON.stringify(payload));
+          window.__hkPreparedSaveString = JSON.stringify(payload);
+          window.__hkPreparedSaveName = `HK_Save_${ts}.json`;
+          if (statusEl) statusEl.textContent = 'Save ready.';
+          if (readyBtn) { readyBtn.style.display = 'inline-block'; }
           return;
         }
       } catch (e) { console.warn('FS snapshot failed:', e); }
 
-      alert('Game is not ready yet for saving. Try again after it finishes loading.');
+      if (statusEl) statusEl.textContent = 'Game not ready for saving. Try again after it finishes loading.';
+      if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Save JSON'; }
     }
 
     function loadJsonIntoUnity() {
@@ -461,6 +474,20 @@
   btnSave && btnSave.addEventListener('click', saveJsonViaUnity);
   btnLoad && btnLoad.addEventListener('click', loadJsonIntoUnity);
     const bar = document.getElementById('save-load-bar');
+    const btnSaveReady = document.getElementById('btn-save-ready');
+    const statusEl = document.getElementById('save-status');
+    btnSaveReady && btnSaveReady.addEventListener('click', () => {
+      if (window.__hkPreparedSaveString && window.__hkPreparedSaveName) {
+        downloadFile(window.__hkPreparedSaveName, window.__hkPreparedSaveString);
+        // reset UI
+        btnSaveReady.style.display = 'none';
+        if (statusEl) statusEl.textContent = 'Downloaded.';
+        const saveBtn = document.getElementById('btn-save');
+        if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Save JSON'; }
+        window.__hkPreparedSaveString = null;
+        window.__hkPreparedSaveName = null;
+      }
+    });
     // Bridge settings UI
     const ubObj = document.getElementById('ub-obj');
     const ubSave = document.getElementById('ub-save');

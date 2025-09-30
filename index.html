@@ -90,6 +90,8 @@
     }
   } catch {}
   const SAVE_KEY = 'hollow_knight_save_data';
+  // Keep the most recent JSON the user loaded, so we can re-download the exact same content if needed
+  let HK_LAST_LOADED_JSON = null;
     let totalBytes = 0, loadedBytes = 0;
     let mbTotalLabel = '...';
     const MB = 1024 * 1024;
@@ -146,6 +148,18 @@
       const str = atob(b64); const u8 = new Uint8Array(str.length);
       for (let i = 0; i < str.length; i++) u8[i] = str.charCodeAt(i);
       return u8;
+    }
+    // Helper: CRC32 for integrity metadata
+    function hkCrc32(str) {
+      let c; const table = hkCrc32.table || (hkCrc32.table = (() => {
+        const t = []; for (let n = 0; n < 256; n++) { c = n; for (let k = 0; k < 8; k++) c = ((c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1)); t[n] = c >>> 0; } return t; })());
+      let crc = 0 ^ (-1);
+      for (let i = 0; i < str.length; i++) crc = (crc >>> 8) ^ table[(crc ^ str.charCodeAt(i)) & 0xFF];
+      return ((crc ^ (-1)) >>> 0).toString(16);
+    }
+    function hkPayload(dataObj) {
+      const dataStr = JSON.stringify(dataObj);
+      return { meta: { version: '1.0', savedAt: Date.now(), checksumHex: hkCrc32(dataStr) }, data: dataObj };
     }
     // Ensure directory path exists in Emscripten FS
     function hkEnsureDirs(FS, fullPath) {
@@ -364,17 +378,60 @@
     }
 
     // Simple JSON Save/Load via Unity SendMessage
-    function saveJsonViaUnity() {
-      if (!window.unityInstance || typeof window.unityInstance.SendMessage !== 'function') {
-        alert('Game is not ready yet. Please wait for it to finish loading.');
-        return;
-      }
-      try {
+    async function saveJsonViaUnity() {
+      // 1) Try to nudge Unity to save (if their build supports a download)
+      try { if (window.unityInstance && typeof window.unityInstance.SendMessage === 'function') {
         window.unityInstance.SendMessage(unityBridge.gameObject, unityBridge.saveMethod, '');
-      } catch (e) {
-        console.error(e);
-        alert(`Could not call ${unityBridge.gameObject}.${unityBridge.saveMethod}. Make sure the method exists in the build.`);
+      }} catch (e) { console.warn('Unity save call failed:', e); }
+
+      // 2) Always produce a real file download as fallback so you never get placeholders
+      // Prefer the most recent JSON that the user loaded (round-trip fidelity)
+      if (HK_LAST_LOADED_JSON) {
+        try {
+          const parsed = JSON.parse(HK_LAST_LOADED_JSON);
+          const payload = hkPayload(parsed);
+          const ts = new Date().toISOString().replace(/[:.]/g,'-');
+          downloadFile(`HK_Save_${ts}.json`, JSON.stringify(payload));
+          return;
+        } catch {}
       }
+
+      // 3) If Unity FS is available, snapshot real save files (PlayerPrefs/IDBFS) into JSON with checksum
+      try {
+        const unity = window.unityInstance; const Module = unity && unity.Module; const FS = Module && Module.FS;
+        if (Module && FS) {
+          // Ensure IDBFS is mounted so we can read persisted files
+          if (Module.IDBFS) {
+            try { if (!FS.analyzePath('/idbfs').exists) { FS.mkdir('/idbfs'); FS.mount(Module.IDBFS, {}, '/idbfs'); } } catch {}
+            await new Promise(r => { try { FS.syncfs(true, () => r()); } catch { r(); } });
+          }
+          const roots = ['/idbfs', '/persistent', '/saves', '/userdata'];
+          const files = [];
+          for (const root of roots) {
+            try {
+              if (!FS.analyzePath(root).exists) continue;
+              const list = FS.readdir(root).filter(f => f !== '.' && f !== '..');
+              for (const name of list) {
+                const full = `${root}/${name}`;
+                try {
+                  const st = FS.stat(full);
+                  if (!FS.isDir(st.mode)) {
+                    const bytes = FS.readFile(full);
+                    files.push({ path: full, b64: hkUint8ToBase64(bytes) });
+                  }
+                } catch {}
+              }
+            } catch {}
+          }
+          const dataObj = { fsSnapshot: { files } };
+          const payload = hkPayload(dataObj);
+          const ts = new Date().toISOString().replace(/[:.]/g,'-');
+          downloadFile(`HK_Save_${ts}.json`, JSON.stringify(payload));
+          return;
+        }
+      } catch (e) { console.warn('FS snapshot failed:', e); }
+
+      alert('Game is not ready yet for saving. Try again after it finishes loading.');
     }
 
     function loadJsonIntoUnity() {
@@ -383,8 +440,13 @@
           alert('Game is not ready yet. Please wait for it to finish loading.');
           return;
         }
+        // Remember the exact JSON for reliable re-downloads later
+        HK_LAST_LOADED_JSON = json;
         try {
-          window.unityInstance.SendMessage(unityBridge.gameObject, unityBridge.loadMethod, json);
+          // If the JSON is wrapped with meta/data from our payload, pass only .data to the game when present
+          let toSend = json;
+          try { const parsed = JSON.parse(json); if (parsed && parsed.meta && parsed.data) toSend = JSON.stringify(parsed.data); } catch {}
+          window.unityInstance.SendMessage(unityBridge.gameObject, unityBridge.loadMethod, toSend);
           alert('Save data sent to the game. If nothing changes, verify the GameObject and method names.');
         } catch (e) {
           console.error(e);

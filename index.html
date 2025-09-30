@@ -290,6 +290,81 @@
       } catch {}
       return hkPayload(dataObj);
     }
+
+    // --- Importers (reverse of the above) ---
+    function reviveIDBValue(v) {
+      try {
+        if (v && typeof v === 'object' && v.__type === 'base64' && typeof v.data === 'string') {
+          return hkBase64ToUint8(v.data).buffer;
+        }
+        if (v && typeof v === 'object' && v.contents && v.contents.__type === 'base64') {
+          return { ...v, contents: hkBase64ToUint8(v.contents.data).buffer };
+        }
+      } catch {}
+      return v;
+    }
+
+    function restoreLocalStorage(lsObj) {
+      if (!lsObj || typeof lsObj !== 'object') return;
+      try {
+        for (const [k, v] of Object.entries(lsObj)) {
+          try { localStorage.setItem(k, String(v)); } catch {}
+        }
+      } catch {}
+    }
+
+    function restoreIndexedDBFileData(items) {
+      return new Promise((resolve) => {
+        if (!Array.isArray(items) || items.length === 0) { resolve(true); return; }
+        const req = indexedDB.open('FILE_DATA');
+        req.onsuccess = () => {
+          const db = req.result;
+          let tx; try { tx = db.transaction('FILE_DATA', 'readwrite'); } catch { try { db.close(); } catch{}; resolve(false); return; }
+          const store = tx.objectStore('FILE_DATA');
+          let remaining = items.length; if (remaining === 0) { try { db.close(); } catch{}; resolve(true); return; }
+          items.forEach(({key, value}) => {
+            const revived = reviveIDBValue(value);
+            const putReq = store.put(revived, key);
+            putReq.onsuccess = () => { if (--remaining === 0) { try { db.close(); } catch{}; resolve(true); } };
+            putReq.onerror = () => { if (--remaining === 0) { try { db.close(); } catch{}; resolve(false); } };
+          });
+        };
+        req.onerror = () => resolve(false);
+      });
+    }
+
+    async function restoreFSSnapshot(fsSnapshot) {
+      try {
+        if (!fsSnapshot || !Array.isArray(fsSnapshot.files)) return true;
+        const unity = window.unityInstance; const Module = unity && unity.Module; const FS = Module && Module.FS;
+        if (!(Module && FS)) return false;
+        if (Module.IDBFS) {
+          try { if (!FS.analyzePath('/idbfs').exists) { FS.mkdir('/idbfs'); FS.mount(Module.IDBFS, {}, '/idbfs'); } } catch {}
+          await new Promise(r => { try { FS.syncfs(true, () => r()); } catch { r(); } });
+        }
+        for (const f of fsSnapshot.files) {
+          try { hkEnsureDirs(FS, f.path); FS.writeFile(f.path, hkBase64ToUint8(f.b64)); } catch {}
+        }
+        try { await new Promise(r => { try { FS.syncfs(false, () => r()); } catch { r(); } }); } catch {}
+        return true;
+      } catch { return false; }
+    }
+
+    async function importBrowserSavePayload(parsedPayload, onStatus) {
+      const payload = parsedPayload && parsedPayload.meta && parsedPayload.data ? parsedPayload.data : parsedPayload;
+      if (!payload || typeof payload !== 'object') throw new Error('Invalid save payload');
+      try { onStatus && onStatus('Restoring localStorage...'); } catch {}
+      if (payload.storage && payload.storage.localStorage) restoreLocalStorage(payload.storage.localStorage);
+      if (payload.storage && payload.storage.indexedDB && Array.isArray(payload.storage.indexedDB.FILE_DATA)) {
+        try { onStatus && onStatus('Restoring IndexedDB...'); } catch {}
+        await restoreIndexedDBFileData(payload.storage.indexedDB.FILE_DATA);
+      }
+      if (payload.fsSnapshot) {
+        try { onStatus && onStatus('Restoring files...'); } catch {}
+        await restoreFSSnapshot(payload.fsSnapshot);
+      }
+      return true;
+    }
     // Ensure directory path exists in Emscripten FS
     function hkEnsureDirs(FS, fullPath) {
       const parts = fullPath.split('/');
@@ -548,22 +623,38 @@
     }
 
     function loadJsonIntoUnity() {
-      uploadFile((json) => {
+      uploadFile(async (json) => {
         if (!window.unityInstance || typeof window.unityInstance.SendMessage !== 'function') {
-          alert('Game is not ready yet. Please wait for it to finish loading.');
-          return;
+          // Even if Unity isn't ready, we can still import browser storage and then reload
         }
         // Remember the exact JSON for reliable re-downloads later
         HK_LAST_LOADED_JSON = json;
+        // Try to detect browser-storage payload and restore it
+        const statusEl = document.getElementById('save-status');
         try {
-          // If the JSON is wrapped with meta/data from our payload, pass only .data to the game when present
-          let toSend = json;
-          try { const parsed = JSON.parse(json); if (parsed && parsed.meta && parsed.data) toSend = JSON.stringify(parsed.data); } catch {}
-          window.unityInstance.SendMessage(unityBridge.gameObject, unityBridge.loadMethod, toSend);
-          alert('Save data sent to the game. If nothing changes, verify the GameObject and method names.');
-        } catch (e) {
-          console.error(e);
-          alert(`Could not call ${unityBridge.gameObject}.${unityBridge.loadMethod}(json). Make sure the method exists in the build.`);
+          const parsed = JSON.parse(json);
+          const dataPart = parsed && parsed.meta && parsed.data ? parsed.data : parsed;
+          const looksLikeBrowserDump = dataPart && (dataPart.storage || dataPart.fsSnapshot);
+          if (looksLikeBrowserDump) {
+            if (statusEl) statusEl.textContent = 'Importing...';
+            await importBrowserSavePayload(parsed, (msg) => { if (statusEl) statusEl.textContent = msg; });
+            if (statusEl) statusEl.textContent = 'Imported. Reloading...';
+            setTimeout(() => location.reload(), 800);
+            return;
+          }
+        } catch {}
+
+        // Fallback: pass JSON to Unity method if available
+        if (window.unityInstance && typeof window.unityInstance.SendMessage === 'function') {
+          try {
+            window.unityInstance.SendMessage(unityBridge.gameObject, unityBridge.loadMethod, json);
+            alert('Save data sent to the game. If nothing changes, verify the GameObject and method names.');
+          } catch (e) {
+            console.error(e);
+            alert(`Could not call ${unityBridge.gameObject}.${unityBridge.loadMethod}(json). Make sure the method exists in the build.`);
+          }
+        } else {
+          alert('Imported save stored. Reloading the page may be required.');
         }
       });
     }

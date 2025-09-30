@@ -211,53 +211,102 @@
       });
     }
 
-    function sanitizeIDBValue(v) {
-      // Emscripten IDBFS values often have .contents as ArrayBuffer
+    function deepSanitizeIDBValue(v, depth = 0) {
       try {
+        if (depth > 5) return v; // avoid very deep recursion
+        if (v instanceof ArrayBuffer) {
+          return { __type: 'base64', data: hkArrayBufferToBase64(v) };
+        }
+        if (ArrayBuffer.isView && ArrayBuffer.isView(v)) {
+          return { __type: 'base64', data: hkUint8ToBase64(new Uint8Array(v.buffer)) };
+        }
         if (v && typeof v === 'object') {
           if (v.contents instanceof ArrayBuffer) {
             return { ...v, contents: { __type: 'base64', data: hkArrayBufferToBase64(v.contents) } };
           }
-          // if the whole value is ArrayBuffer
-          if (v instanceof ArrayBuffer) {
-            return { __type: 'base64', data: hkArrayBufferToBase64(v) };
+          if (Array.isArray(v)) {
+            return v.map(item => deepSanitizeIDBValue(item, depth + 1));
           }
+          const out = {};
+          for (const [k, val] of Object.entries(v)) out[k] = deepSanitizeIDBValue(val, depth + 1);
+          return out;
         }
       } catch {}
       return v;
     }
 
-    async function exportIndexedDBFileData() {
-      // Try to open the typical Emscripten IDBFS database
+    async function exportIndexedDB_IDBFS_FILE_DATA() {
+      // Emscripten IDBFS: DB name 'IDBFS', store 'FILE_DATA'
       return new Promise((resolve) => {
         const out = { ok: false };
-        let canceled = false;
-        const req = indexedDB.open('FILE_DATA');
-        req.onupgradeneeded = (e) => { try { e.target.transaction.abort(); canceled = true; } catch {} };
+        const req = indexedDB.open('IDBFS');
         req.onsuccess = async () => {
-          if (canceled) { try { req.result.close(); } catch{}; resolve(out); return; }
           const db = req.result;
-          let tx;
-          try { tx = db.transaction('FILE_DATA', 'readonly'); } catch {
-            try { db.close(); } catch{}; resolve(out); return;
-          }
-          const store = tx.objectStore('FILE_DATA');
-          const items = await readAllFromStore(store);
+          try {
+            const tx = db.transaction('FILE_DATA', 'readonly');
+            const store = tx.objectStore('FILE_DATA');
+            const items = await readAllFromStore(store);
+            out.ok = true;
+            out.items = items.map(({key, value}) => ({ key, value: deepSanitizeIDBValue(value) }));
+          } catch {}
           try { db.close(); } catch{}
-          out.ok = true;
-          out.items = items.map(({key, value}) => ({ key, value: sanitizeIDBValue(value) }));
           resolve(out);
         };
         req.onerror = () => resolve(out);
       });
     }
 
+    async function exportAllIndexedDB() {
+      const result = {};
+      try {
+        if (indexedDB.databases) {
+          const dbs = await indexedDB.databases();
+          for (const info of dbs) {
+            const name = info.name;
+            if (!name) continue;
+            result[name] = {};
+            await new Promise((resolveDb) => {
+              const req = indexedDB.open(name);
+              req.onsuccess = async () => {
+                const db = req.result;
+                try {
+                  const stores = Array.from(db.objectStoreNames || []);
+                  for (const storeName of stores) {
+                    try {
+                      const tx = db.transaction(storeName, 'readonly');
+                      const store = tx.objectStore(storeName);
+                      const items = await readAllFromStore(store);
+                      result[name][storeName] = items.map(({key, value}) => ({ key, value: deepSanitizeIDBValue(value) }));
+                    } catch {}
+                  }
+                } catch {}
+                try { db.close(); } catch {}
+                resolveDb();
+              };
+              req.onerror = () => resolveDb();
+            });
+          }
+        }
+      } catch {}
+      return result;
+    }
+
     async function buildBrowserSavePayload() {
       const dataObj = { storage: { localStorage: exportLocalStorage() } };
-      // Try raw IndexedDB FILE_DATA
+      // Try common Emscripten IDBFS DB
       try {
-        const idbDump = await exportIndexedDBFileData();
-        if (idbDump && idbDump.ok) dataObj.storage.indexedDB = { FILE_DATA: idbDump.items };
+        const idbfsDump = await exportIndexedDB_IDBFS_FILE_DATA();
+        if (idbfsDump && idbfsDump.ok) {
+          dataObj.storage.indexedDB = dataObj.storage.indexedDB || {};
+          dataObj.storage.indexedDB.IDBFS = { FILE_DATA: idbfsDump.items };
+        }
+      } catch {}
+      // Dump all IndexedDB databases/stores (if supported)
+      try {
+        const all = await exportAllIndexedDB();
+        if (all && Object.keys(all).length) {
+          dataObj.storage.indexedDBGeneric = all;
+        }
       } catch {}
       // If FS is available, add file-level snapshot too (may duplicate IDB but useful)
       try {
@@ -292,13 +341,20 @@
     }
 
     // --- Importers (reverse of the above) ---
-    function reviveIDBValue(v) {
+    function deepReviveIDBValue(v, depth = 0) {
+      if (depth > 5) return v;
       try {
         if (v && typeof v === 'object' && v.__type === 'base64' && typeof v.data === 'string') {
           return hkBase64ToUint8(v.data).buffer;
         }
         if (v && typeof v === 'object' && v.contents && v.contents.__type === 'base64') {
           return { ...v, contents: hkBase64ToUint8(v.contents.data).buffer };
+        }
+        if (Array.isArray(v)) return v.map(x => deepReviveIDBValue(x, depth + 1));
+        if (v && typeof v === 'object') {
+          const out = {};
+          for (const [k, val] of Object.entries(v)) out[k] = deepReviveIDBValue(val, depth + 1);
+          return out;
         }
       } catch {}
       return v;
@@ -316,20 +372,60 @@
     function restoreIndexedDBFileData(items) {
       return new Promise((resolve) => {
         if (!Array.isArray(items) || items.length === 0) { resolve(true); return; }
-        const req = indexedDB.open('FILE_DATA');
+        const req = indexedDB.open('IDBFS');
         req.onsuccess = () => {
           const db = req.result;
           let tx; try { tx = db.transaction('FILE_DATA', 'readwrite'); } catch { try { db.close(); } catch{}; resolve(false); return; }
           const store = tx.objectStore('FILE_DATA');
           let remaining = items.length; if (remaining === 0) { try { db.close(); } catch{}; resolve(true); return; }
           items.forEach(({key, value}) => {
-            const revived = reviveIDBValue(value);
+            const revived = deepReviveIDBValue(value);
             const putReq = store.put(revived, key);
             putReq.onsuccess = () => { if (--remaining === 0) { try { db.close(); } catch{}; resolve(true); } };
             putReq.onerror = () => { if (--remaining === 0) { try { db.close(); } catch{}; resolve(false); } };
           });
         };
         req.onerror = () => resolve(false);
+      });
+    }
+
+    function restoreIndexedDBGeneric(allDbs) {
+      return new Promise(async (resolve) => {
+        if (!allDbs || typeof allDbs !== 'object') { resolve(true); return; }
+        const dbNames = Object.keys(allDbs);
+        for (const dbName of dbNames) {
+          const stores = allDbs[dbName];
+          if (!stores || typeof stores !== 'object') continue;
+          await new Promise((resolveDb) => {
+            const req = indexedDB.open(dbName);
+            req.onsuccess = async () => {
+              const db = req.result;
+              try {
+                for (const storeName of Object.keys(stores)) {
+                  try {
+                    const tx = db.transaction(storeName, 'readwrite');
+                    const store = tx.objectStore(storeName);
+                    const items = stores[storeName];
+                    await new Promise((resolveStore) => {
+                      let remaining = items.length;
+                      if (remaining === 0) { resolveStore(); return; }
+                      items.forEach(({key, value}) => {
+                        const revived = deepReviveIDBValue(value);
+                        const putReq = store.put(revived, key);
+                        const done = () => { if (--remaining === 0) resolveStore(); };
+                        putReq.onsuccess = done; putReq.onerror = done;
+                      });
+                    });
+                  } catch {}
+                }
+              } catch {}
+              try { db.close(); } catch {}
+              resolveDb();
+            };
+            req.onerror = () => resolveDb();
+          });
+        }
+        resolve(true);
       });
     }
 
@@ -355,9 +451,13 @@
       if (!payload || typeof payload !== 'object') throw new Error('Invalid save payload');
       try { onStatus && onStatus('Restoring localStorage...'); } catch {}
       if (payload.storage && payload.storage.localStorage) restoreLocalStorage(payload.storage.localStorage);
-      if (payload.storage && payload.storage.indexedDB && Array.isArray(payload.storage.indexedDB.FILE_DATA)) {
-        try { onStatus && onStatus('Restoring IndexedDB...'); } catch {}
-        await restoreIndexedDBFileData(payload.storage.indexedDB.FILE_DATA);
+      if (payload.storage && payload.storage.indexedDB && payload.storage.indexedDB.IDBFS && Array.isArray(payload.storage.indexedDB.IDBFS.FILE_DATA)) {
+        try { onStatus && onStatus('Restoring IDBFS...'); } catch {}
+        await restoreIndexedDBFileData(payload.storage.indexedDB.IDBFS.FILE_DATA);
+      }
+      if (payload.storage && payload.storage.indexedDBGeneric) {
+        try { onStatus && onStatus('Restoring IndexedDB databases...'); } catch {}
+        await restoreIndexedDBGeneric(payload.storage.indexedDBGeneric);
       }
       if (payload.fsSnapshot) {
         try { onStatus && onStatus('Restoring files...'); } catch {}

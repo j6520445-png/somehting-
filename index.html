@@ -151,6 +151,11 @@
       for (let i = 0; i < str.length; i++) u8[i] = str.charCodeAt(i);
       return u8;
     }
+    // Helper: arrayBuffer -> base64
+    function hkArrayBufferToBase64(buf) {
+      const u8 = new Uint8Array(buf);
+      return hkUint8ToBase64(u8);
+    }
     // Helper: CRC32 for integrity metadata
     function hkCrc32(str) {
       let c; const table = hkCrc32.table || (hkCrc32.table = (() => {
@@ -162,6 +167,128 @@
     function hkPayload(dataObj) {
       const dataStr = JSON.stringify(dataObj);
       return { meta: { version: '1.0', savedAt: Date.now(), checksumHex: hkCrc32(dataStr) }, data: dataObj };
+    }
+
+    // --- Browser storage exporters ---
+    function exportLocalStorage() {
+      const out = {};
+      try {
+        for (let i = 0; i < localStorage.length; i++) {
+          const k = localStorage.key(i);
+          out[k] = localStorage.getItem(k);
+        }
+      } catch {}
+      return out;
+    }
+
+    function readAllFromStore(store) {
+      return new Promise((resolve) => {
+        const items = [];
+        if (store.getAll && store.getAllKeys) {
+          const reqVals = store.getAll();
+          const reqKeys = store.getAllKeys();
+          let vals=null, keys=null;
+          reqVals.onsuccess = () => { vals = reqVals.result; if (keys!==null) finish(); };
+          reqKeys.onsuccess = () => { keys = reqKeys.result; if (vals!==null) finish(); };
+          reqVals.onerror = reqKeys.onerror = () => resolve(items);
+          function finish() {
+            for (let i = 0; i < keys.length; i++) {
+              const key = keys[i];
+              const value = vals[i];
+              items.push({ key, value });
+            }
+            resolve(items);
+          }
+        } else {
+          const cursor = store.openCursor();
+          cursor.onsuccess = (e) => {
+            const cur = e.target.result;
+            if (cur) { items.push({ key: cur.key, value: cur.value }); cur.continue(); }
+            else resolve(items);
+          };
+          cursor.onerror = () => resolve(items);
+        }
+      });
+    }
+
+    function sanitizeIDBValue(v) {
+      // Emscripten IDBFS values often have .contents as ArrayBuffer
+      try {
+        if (v && typeof v === 'object') {
+          if (v.contents instanceof ArrayBuffer) {
+            return { ...v, contents: { __type: 'base64', data: hkArrayBufferToBase64(v.contents) } };
+          }
+          // if the whole value is ArrayBuffer
+          if (v instanceof ArrayBuffer) {
+            return { __type: 'base64', data: hkArrayBufferToBase64(v) };
+          }
+        }
+      } catch {}
+      return v;
+    }
+
+    async function exportIndexedDBFileData() {
+      // Try to open the typical Emscripten IDBFS database
+      return new Promise((resolve) => {
+        const out = { ok: false };
+        let canceled = false;
+        const req = indexedDB.open('FILE_DATA');
+        req.onupgradeneeded = (e) => { try { e.target.transaction.abort(); canceled = true; } catch {} };
+        req.onsuccess = async () => {
+          if (canceled) { try { req.result.close(); } catch{}; resolve(out); return; }
+          const db = req.result;
+          let tx;
+          try { tx = db.transaction('FILE_DATA', 'readonly'); } catch {
+            try { db.close(); } catch{}; resolve(out); return;
+          }
+          const store = tx.objectStore('FILE_DATA');
+          const items = await readAllFromStore(store);
+          try { db.close(); } catch{}
+          out.ok = true;
+          out.items = items.map(({key, value}) => ({ key, value: sanitizeIDBValue(value) }));
+          resolve(out);
+        };
+        req.onerror = () => resolve(out);
+      });
+    }
+
+    async function buildBrowserSavePayload() {
+      const dataObj = { storage: { localStorage: exportLocalStorage() } };
+      // Try raw IndexedDB FILE_DATA
+      try {
+        const idbDump = await exportIndexedDBFileData();
+        if (idbDump && idbDump.ok) dataObj.storage.indexedDB = { FILE_DATA: idbDump.items };
+      } catch {}
+      // If FS is available, add file-level snapshot too (may duplicate IDB but useful)
+      try {
+        const unity = window.unityInstance; const Module = unity && unity.Module; const FS = Module && Module.FS;
+        if (Module && FS) {
+          if (Module.IDBFS) {
+            try { if (!FS.analyzePath('/idbfs').exists) { FS.mkdir('/idbfs'); FS.mount(Module.IDBFS, {}, '/idbfs'); } } catch {}
+            await new Promise(r => { try { FS.syncfs(true, () => r()); } catch { r(); } });
+          }
+          const roots = ['/idbfs', '/persistent', '/saves', '/userdata'];
+          const files = [];
+          for (const root of roots) {
+            try {
+              if (!FS.analyzePath(root).exists) continue;
+              const list = FS.readdir(root).filter(f => f !== '.' && f !== '..');
+              for (const name of list) {
+                const full = `${root}/${name}`;
+                try {
+                  const st = FS.stat(full);
+                  if (!FS.isDir(st.mode)) {
+                    const bytes = FS.readFile(full);
+                    files.push({ path: full, b64: hkUint8ToBase64(bytes) });
+                  }
+                } catch {}
+              }
+            } catch {}
+          }
+          dataObj.fsSnapshot = { files };
+        }
+      } catch {}
+      return hkPayload(dataObj);
     }
     // Ensure directory path exists in Emscripten FS
     function hkEnsureDirs(FS, fullPath) {
@@ -402,48 +529,21 @@
         } catch {}
       }
 
-      // 3) If Unity FS is available, snapshot real save files (PlayerPrefs/IDBFS) into JSON with checksum.
-      // Because this requires async, prepare the payload and then ask user to click the 'Download Ready' button
+      // 3) Build a browser-side save payload (localStorage + IndexedDB FILE_DATA + FS snapshot if available)
+      // Prepare asynchronously, then show a Download Ready button to satisfy browser gesture rules
       if (statusEl) statusEl.textContent = 'Preparing save...';
       if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Preparing...'; }
       try {
-        const unity = window.unityInstance; const Module = unity && unity.Module; const FS = Module && Module.FS;
-        if (Module && FS) {
-          // Ensure IDBFS is mounted so we can read persisted files
-          if (Module.IDBFS) {
-            try { if (!FS.analyzePath('/idbfs').exists) { FS.mkdir('/idbfs'); FS.mount(Module.IDBFS, {}, '/idbfs'); } } catch {}
-            await new Promise(r => { try { FS.syncfs(true, () => r()); } catch { r(); } });
-          }
-          const roots = ['/idbfs', '/persistent', '/saves', '/userdata'];
-          const files = [];
-          for (const root of roots) {
-            try {
-              if (!FS.analyzePath(root).exists) continue;
-              const list = FS.readdir(root).filter(f => f !== '.' && f !== '..');
-              for (const name of list) {
-                const full = `${root}/${name}`;
-                try {
-                  const st = FS.stat(full);
-                  if (!FS.isDir(st.mode)) {
-                    const bytes = FS.readFile(full);
-                    files.push({ path: full, b64: hkUint8ToBase64(bytes) });
-                  }
-                } catch {}
-              }
-            } catch {}
-          }
-          const dataObj = { fsSnapshot: { files } };
-          const payload = hkPayload(dataObj);
+          const payload = await buildBrowserSavePayload();
           const ts = new Date().toISOString().replace(/[:.]/g,'-');
           window.__hkPreparedSaveString = JSON.stringify(payload);
           window.__hkPreparedSaveName = `HK_Save_${ts}.json`;
           if (statusEl) statusEl.textContent = 'Save ready.';
           if (readyBtn) { readyBtn.style.display = 'inline-block'; }
           return;
-        }
       } catch (e) { console.warn('FS snapshot failed:', e); }
 
-      if (statusEl) statusEl.textContent = 'Game not ready for saving. Try again after it finishes loading.';
+      if (statusEl) statusEl.textContent = 'Could not prepare save payload.';
       if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Save JSON'; }
     }
 
